@@ -1,0 +1,39 @@
+---
+title: "Critical Infrastructure Security: Boston Metro Power Grid"
+year: "2026"
+role: "Researcher"
+summary: "Modeled the Boston metropolitan electric distribution network as a graph to quantify structural vulnerability and rank the substations most critical to attack."
+stack: ["Python", "Graph Analysis", "MBRA", "Fault Tree Analysis"]
+tags: ["Critical Infrastructure", "Risk Analysis", "Research"]
+featured: true
+order: 2
+---
+
+## Problem
+
+Electric distribution networks fail in correlated, cascading ways — knocking out
+the wrong node can take down a whole district. The question I set out to answer:
+which parts of the Boston metro grid matter most, and how does the network behave
+under both random failures and a targeted attack?
+
+## Approach
+
+I modeled the Boston Metropolitan Electric Power Distribution Network as an
+eight-node graph with an adjacency matrix, then computed structural metrics to
+locate weak points:
+
+- **Degree, betweenness, and eigenvector centrality** to rank how important each
+  node is to the network's connectivity.
+- **Spectral radius** of the adjacency matrix as a measure of overall robustness.
+- **Multi-Criteria Betweenness-based Risk Assessment (MBRA)** to rank critical
+  nodes under targeted versus random failure scenarios.
+- **Fault tree analysis** on the Downtown Distribution Substation to trace how
+  component-level failures propagate into a district-wide outage.
+
+## Outcome
+
+The analysis identified the substations whose loss would do the most structural
+damage and framed the findings inside the DHS Energy Sector cybersecurity
+framework. The work was submitted to Prof. Themis A. Papageorge in April 2026.
+It reinforced a core idea of infrastructure defense: you protect a network by
+understanding its topology, not just its perimeter.

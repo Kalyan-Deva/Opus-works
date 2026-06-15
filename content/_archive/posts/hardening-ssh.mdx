@@ -1,0 +1,92 @@
+---
+title: "Hardening SSH the Right Way"
+date: "2026-03-05"
+excerpt: "A practical guide to locking down sshd: key-only auth, modern key types, MFA, rate limiting, certificates, and bastion hosts."
+category: "Security"
+tags: ["Security", "Linux", "SSH"]
+author: "The Author"
+---
+
+SSH is the front door to most servers, which makes it a constant target for automated attacks. The good news is that a handful of configuration changes eliminate the overwhelming majority of that risk. Here is how to harden it properly.
+
+## Use modern keys, not passwords
+
+Password authentication invites brute-force and credential-stuffing attacks. Switch to public-key authentication and prefer **Ed25519**, which is fast, compact, and secure:
+
+```bash title="keygen.sh" showLineNumbers
+# Generate a modern Ed25519 key pair
+ssh-keygen -t ed25519 -C "ada@workstation"
+
+# Copy the public key to the server
+ssh-copy-id -i ~/.ssh/id_ed25519.pub user@server
+```
+
+Once your key works, disable password login entirely.
+
+## A hardened sshd_config
+
+The bulk of hardening lives in `/etc/ssh/sshd_config`. This block disables the riskiest defaults:
+
+```bash title="/etc/ssh/sshd_config" showLineNumbers {2,3,8}
+# Authentication
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+
+# Limit exposure
+AllowUsers deploy admin
+MaxAuthTries 3
+MaxSessions 4
+LoginGraceTime 20
+ClientAliveInterval 300
+ClientAliveCountMax 2
+X11Forwarding no
+AllowAgentForwarding no
+```
+
+After editing, validate before reloading so you do not lock yourself out:
+
+```bash title="apply.sh" showLineNumbers {2}
+sudo sshd -t            # test config syntax
+sudo systemctl reload ssh
+```
+
+> Tip: Keep your current SSH session open while you test the reload in a second terminal. If something is wrong, you can revert without being locked out.
+
+## Add a second factor
+
+Key-only auth is strong, but high-value hosts benefit from **MFA**. A TOTP module (such as `pam_google_authenticator`) layered into PAM requires both the key and a time-based code, so a stolen key alone is not enough.
+
+## Rate-limit and block abuse
+
+Even with password login disabled, brute-force noise wastes resources and clutters logs. **fail2ban** watches the auth log and temporarily bans IPs that fail repeatedly:
+
+```ini title="/etc/fail2ban/jail.local" showLineNumbers
+[sshd]
+enabled  = true
+maxretry = 4
+findtime = 10m
+bantime  = 1h
+```
+
+For larger fleets, restrict the SSH port at the firewall to known source ranges.
+
+## Scale trust with certificates and bastions
+
+Managing `authorized_keys` files by hand does not scale. Two patterns fix that:
+
+- **SSH certificates.** Run a small certificate authority (CA) that signs short-lived user certificates. Servers trust the CA's public key, so you never distribute individual keys, and access expires automatically.
+- **Bastion hosts.** Funnel all SSH access through a single hardened jump host. Internal servers accept connections only from the bastion, shrinking the attack surface to one well-monitored entry point.
+
+```bash title="~/.ssh/config" showLineNumbers {3}
+Host internal-db
+  HostName 10.0.1.20
+  ProxyJump bastion.example.com
+  User deploy
+```
+
+## The short version
+
+Disable root and password login, require Ed25519 keys, cap auth attempts, and add MFA on sensitive hosts. Layer fail2ban and firewall rules to cut the noise, then graduate to SSH certificates and a bastion as your fleet grows. Each step is small; together they turn SSH from a liability into one of the most defensible services you run.

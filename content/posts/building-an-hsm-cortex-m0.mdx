@@ -1,0 +1,212 @@
+---
+title: "Building an HSM on a Cortex-M0+: Lessons from MITRE eCTF 2026"
+date: "2026-04-02"
+excerpt: "What it takes to make firmware keep its secrets when the attacker holds the chip — a build log of a hardware security module on a bare-metal ARM Cortex-M0+."
+category: "Embedded Security"
+tags: ["Embedded Security", "Cryptography", "Firmware", "ARM"]
+author: "Kalyan Gopalam"
+---
+
+Most of the security work I had done before this started from a comfortable assumption: the attacker is somewhere else. They are on the other side of a network socket, or behind a login form, or at the far end of a phishing email. You get to keep your machine. The threat lives at arm's length, and your whole job is to keep it there.
+
+A hardware security module throws that assumption out. The defining premise of an HSM is that the attacker is holding the device. They can put it on a bench, probe its pins, cut its power at a precise microsecond, watch its power consumption with an oscilloscope, and run the same firmware ten thousand times while changing one variable. The secret you are protecting is sitting inside a chip that is physically in their hands. Your firmware has to keep that secret anyway.
+
+This past season I led Team NEU-1, "NeuSense," as Team Lead in MITRE's eCTF — the national Embedded Capture the Flag, an embedded-security competition where every team builds a system to a published spec and then attacks every other team's system. I architected the full cryptographic stack for our entry: a Hardware Security Module running bare-metal on an ARM Cortex-M0+. No operating system, no memory protection unit worth the name, no rich runtime to hide behind. Just a small 32-bit core, a crypto peripheral, and a threat model that assumes the adversary owns the silicon.
+
+This is a build log of that stack: why HSMs exist, why we derive keys instead of storing them, why timing is a secret, how we authenticated everything, how the PIN logic fails closed, and what I would change if I started over. A lot of it is general embedded-security knowledge that I had to internalize the hard way, so I will explain the concepts as I go.
+
+## Why an HSM, and why the physical threat model changes everything
+
+An HSM is a dedicated piece of hardware whose entire purpose is to perform cryptographic operations while never letting the underlying keys leave its boundary. You ask it to sign something, decrypt something, or derive a session key, and it gives you the result — but the key material itself stays inside. Bank payment networks use HSMs to protect PIN-verification keys. Certificate authorities use them to protect the private keys that anchor the public-key infrastructure. Cloud providers rent them out so customers can hold keys that even the provider's own administrators cannot read.
+
+The reason HSMs are their own category of device — rather than just "a program that does crypto" — is the threat model. A normal application trusts the machine it runs on. An HSM does not get that luxury, because the whole point is to remain secure even when the surrounding system, and in the strongest versions the physical device itself, is in hostile hands.
+
+In the eCTF threat model, this is explicit. We had to assume an attacker who could:
+
+- Read out any non-volatile memory they could physically reach, including flash.
+- Measure the timing of every operation to the cycle.
+- Observe analog side channels — power draw, electromagnetic emissions — while the device ran.
+- Inject faults: glitch the clock or the supply voltage to make an instruction misbehave at a chosen moment.
+
+That last category is the one that bends your brain when you come from network security. In a normal program, you assume that `if (pin_correct)` either runs the true branch or the false branch. A fault-injection attacker assumes neither. They assume they can make the comparison itself return the wrong answer by corrupting the core at the right nanosecond. Once you accept that the hardware can lie to your code, you stop writing code that trusts a single check.
+
+On top of all that, we were doing it on a Cortex-M0+. That matters. The M0+ is a deliberately minimal core — a two-stage pipeline, the ARMv6-M instruction set, no caches, and critically, no hardware integer divide and no single-cycle multiply guarantee on every variant. The lack of caches is actually a small blessing for constant-time work, because cache-timing attacks are off the table. But the small instruction set and the absence of a real MPU mean you are building your defenses out of very few primitives. There is nowhere to hide a mistake.
+
+## The key hierarchy: derive, do not store
+
+The first real architectural decision was how to manage keys, and the principle we built around is simple to state and easy to get wrong: **store as little secret material as possible, and derive everything else.**
+
+Every byte of long-lived secret you write to flash is a byte the physical attacker gets to try to extract. Flash is not a vault. Given enough effort — decapsulation, microprobing, voltage-contrast imaging — stored bits can be read. So the design goal is to minimize the blast radius of any single extracted secret, and to make sure that compromising one device does not compromise the fleet.
+
+The tool for this is a **key derivation function**, and specifically HKDF — the HMAC-based Key Derivation Function specified in RFC 5869. HKDF takes one piece of input keying material plus a non-secret "info" label and a salt, and produces output key material that is cryptographically bound to that label. The important property is one-wayness: given a derived key, you cannot run the function backwards to recover the input. So a key sitting one level down the hierarchy tells you nothing about the key it came from.
+
+We built a three-tier hierarchy:
+
+```c title="key_hierarchy.c" showLineNumbers {7}
+/* Conceptual key-derivation hierarchy.
+ * Each level is derived from the level above via HKDF (RFC 5869).
+ * Only ROOT_SEED is provisioned; everything else is computed on demand. */
+
+/* Level 0: provisioned once at manufacture, unique per device. */
+extern const uint8_t ROOT_SEED[32];   /* never leaves the device */
+
+/* Level 1: binds the root to this physical device's identity. */
+void derive_device_seed(uint8_t device_seed[32], const uint8_t dev_id[16]) {
+    hkdf_sha256(ROOT_SEED, 32,         /* input keying material */
+                dev_id, 16,            /* salt: per-device identity */
+                (const uint8_t *)"NEU1-device-v1", 14,  /* info label */
+                device_seed, 32);
+}
+
+/* Level 2: purpose-separated working keys, derived per use. */
+void derive_enc_seed(uint8_t enc_seed[32], const uint8_t device_seed[32]) {
+    hkdf_sha256(device_seed, 32, NULL, 0,
+                (const uint8_t *)"NEU1-enc-v1", 11,
+                enc_seed, 32);
+}
+
+void derive_session_seed(uint8_t session_seed[32],
+                         const uint8_t device_seed[32],
+                         const uint8_t nonce[16]) {
+    hkdf_sha256(device_seed, 32,
+                nonce, 16,             /* salt: fresh per session */
+                (const uint8_t *)"NEU1-session-v1", 15,
+                session_seed, 32);
+}
+```
+
+The flow is `ROOT_SEED -> DEVICE_SEED -> ENC_SEED` for data-at-rest encryption, and `ROOT_SEED -> DEVICE_SEED -> SESSION_SEED` for per-session keys, with the session seed salted by a fresh nonce so that no two sessions ever use the same key even though they descend from the same parent.
+
+Several things fall out of this structure, and each one was a deliberate choice.
+
+**Only the root is stored.** `DEVICE_SEED`, `ENC_SEED`, and `SESSION_SEED` are computed into RAM when needed and wiped after. If you dump flash, you get the root and nothing else — and the root by itself does not let you skip the device-binding step.
+
+**The labels enforce domain separation.** Each call to HKDF uses a distinct `info` string. This guarantees that the encryption key and the session key are cryptographically unrelated even though they come from the same device seed. If an attacker somehow learned `ENC_SEED`, it would give them no leverage over any `SESSION_SEED`, because there is no path between siblings — only down from the parent, and the function does not run upward.
+
+**The per-device salt isolates devices.** Because `DEVICE_SEED` mixes in a per-device identity as the salt, two devices flashed with the same root still derive different device seeds. There is no fleet-wide key. Cracking one unit does not hand you the others.
+
+The mental model I kept coming back to: a stored key is a liability that exists 100% of the time; a derived key is an asset that exists only for the microseconds you actually need it, and then it is gone. We pushed the lifetime of every secret toward zero.
+
+## Constant-time crypto and why timing is a secret
+
+Here is the idea that took me the longest to truly believe: **how long your code takes to run can leak the secret it is operating on.**
+
+Consider the most natural way to compare a computed authentication tag against the one an attacker supplied:
+
+```c
+/* WRONG: leaks how many bytes matched via early return. */
+if (memcmp(computed_tag, received_tag, 32) != 0)
+    return AUTH_FAIL;
+```
+
+`memcmp` returns as soon as it finds a mismatching byte. That means a tag that matches the first byte takes microscopically longer to reject than a tag that fails on byte zero. An attacker who can measure that timing can recover the correct tag one byte at a time — turning a 2^256 guessing problem into a few hundred measurements per byte. The secret leaks not through the value returned, but through the time spent returning it.
+
+The fix is a constant-time comparison: look at every byte regardless, accumulate differences without branching, and only collapse to a single yes/no at the very end.
+
+```c title="ct_compare.c" showLineNumbers {5}
+/* Constant-time equality: runtime is independent of where, or whether,
+ * the inputs differ. No data-dependent branch, no early exit. */
+int ct_memcmp(const uint8_t *a, const uint8_t *b, size_t len) {
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= a[i] ^ b[i];   /* OR in every byte; never branch on data */
+    }
+    /* diff is 0 iff every byte matched. Fold to 0 or 1 with no branch. */
+    return (int)((diff | (uint8_t)(-(int)diff)) >> 7) & 1;
+}
+```
+
+The `volatile` keyword matters more than it looks. Without it, an optimizing compiler is free to notice that it could short-circuit the loop the moment `diff` becomes non-zero, and it will happily reintroduce the timing leak you just removed. `volatile` forces the accumulation to actually happen on every iteration. This is one of those places where "the C abstract machine is constant-time" and "the emitted ARM instructions are constant-time" are different claims, and only the second one matters to an attacker with a logic analyzer. I disassembled the hot paths to confirm the loop was not being unrolled with an early break.
+
+The same principle extends past comparisons. Any operation whose control flow or memory-access pattern depends on a secret is a potential timing oracle: branching on a secret bit, indexing a table with a secret, looping a secret number of times. The discipline is to make the work the secret-dependent code does identical regardless of the secret's value.
+
+This is exactly where the hardware crypto peripheral earned its place. We used the `AESADV` block for AES-CBC with a 256-bit key. A hardware AES engine performs each round in fixed logic, so the encryption time does not depend on the key or the plaintext the way a naive software S-box lookup might. That alone removes a whole class of timing and cache-timing leakage that pure-software AES has to fight against on larger cores.
+
+But there was a subtler win: we drove the crypto through **DMA**. Instead of the CPU copying each block into the peripheral and spinning on a status flag, we set up a DMA descriptor and let the engine pull plaintext and push ciphertext on its own, with the core either sleeping or doing unrelated fixed work. DMA-driven offload matters for timing safety because it decouples the observable CPU behavior from the data being encrypted. The core is not running a data-dependent copy loop whose duration an attacker could correlate with message length or content in a revealing way; the transfer is a fixed peripheral operation. It is also simply faster and lower-power, which on a small core with a real-time-ish workload is its own reward. The cost is that DMA introduces shared-buffer ordering hazards — you have to be rigorous about cache/memory barriers and about not touching a buffer the engine still owns — and getting that wrong produces beautifully intermittent bugs.
+
+## Authentication: nothing is trusted until HMAC says so
+
+Encryption hides data. It does not tell you whether the data is authentic or whether it was tampered with. CBC mode in particular is malleable in nasty ways — an attacker who flips a bit in the ciphertext produces a predictable change in the decrypted plaintext, and if you act on decrypted-but-unauthenticated data, you are building an oracle for them.
+
+So every message in our system carried an **HMAC-SHA256** tag, and the rule was absolute: authenticate first, then decrypt, then act. We used encrypt-then-MAC ordering, computing the HMAC over the ciphertext and associated metadata. On receipt, we recomputed the HMAC over the bytes as received and compared it — with the constant-time comparison above — before AES ever touched the payload. If the tag did not verify, the ciphertext was treated as random garbage and discarded. No decryption, no parsing, no logging of contents, nothing.
+
+HMAC is the right tool here because it is a keyed construction: producing a valid tag requires the key, which lives in the derived `SESSION_SEED`. A plain hash would let anyone recompute the tag over modified data. HMAC's nested structure (`H(key ^ opad || H(key ^ ipad || msg))`) is specifically designed to resist the length-extension and related attacks that a naive `H(key || msg)` would expose. Using SHA-256 underneath gives a 256-bit tag, which makes forgery by guessing computationally hopeless and pairs naturally with our 256-bit key material.
+
+The architectural point is that authentication is not a feature you add to a message format; it is a gate the rest of the system sits behind. Anything that has not passed the HMAC gate does not get to influence control flow. That single rule — never act on unauthenticated input — eliminates an enormous fraction of the protocol-level attacks teams find in each other's submissions during the attack phase.
+
+## PIN rate limiting and fail-closed design
+
+The HSM gated sensitive operations behind a PIN. A PIN is, by nature, low-entropy — a human has to remember it — which means the only thing standing between an attacker and a brute-force win is how many guesses you let them make and how fast. So the PIN logic was less about cryptography and more about discipline around state.
+
+Two principles drove it.
+
+**Rate limiting with persistent, monotonic state.** A failed PIN attempt increments a counter that lives in non-volatile memory and is written *before* the response goes out. The delay between allowed attempts grows with the count. The key subtlety on an HSM is that the attacker controls power: their favorite move against a naive design is to enter a guess, watch for the "wrong" signal, and yank power before the failure counter gets persisted, resetting the budget for free. So the counter increment has to be committed durably before any branch that could reveal success or failure, and the design has to treat an interrupted attempt as a *used* attempt. You bias every ambiguous case against the attacker.
+
+**Fail closed.** Every code path that could not positively confirm authorization had to deny. This sounds obvious and is constantly violated in practice, because the natural way to write authorization code is to enumerate the failure cases and `return ALLOW` at the bottom — which means any unhandled state, any glitch that skips a check, any path the author did not think of, falls through to "allow." We inverted that. The default was deny; access required an explicit, positive, verified grant; and an unknown or corrupted state was treated as a denial, not as a benign default.
+
+```c title="fail_closed.c" showLineNumbers {3}
+/* Default-deny authorization. The function starts denied and only an
+ * explicit, verified success path can flip it. Any glitch that skips
+ * a step, or any unforeseen state, lands on DENY. */
+auth_result_t check_pin(const uint8_t *attempt, size_t len) {
+    auth_result_t result = AUTH_DENY;        /* start denied */
+
+    if (attempt_counter >= MAX_ATTEMPTS)
+        return AUTH_DENY;                     /* locked out */
+
+    persist_attempt_counter(attempt_counter + 1);  /* commit BEFORE checking */
+
+    uint8_t expected[32];
+    derive_pin_verifier(expected);            /* derived, not stored raw */
+
+    if (ct_memcmp(attempt_hash(attempt, len), expected, 32) == 0) {
+        if (verify_redundant_flag() == FLAG_OK) {   /* second, independent check */
+            result = AUTH_GRANT;
+            reset_attempt_counter();
+        }
+    }
+    secure_wipe(expected, sizeof expected);
+    return result;
+}
+```
+
+Notice the counter is persisted before the comparison, and notice the redundant second check before granting. That second check is not paranoia for its own sake — it is the bridge into the next problem.
+
+## Defending against glitching and side channels
+
+This is where embedded security stops resembling anything I knew from the software world.
+
+**Fault injection (glitching).** An attacker who can momentarily drop the supply voltage or inject a fast clock edge can cause the core to skip an instruction or corrupt a register at a chosen moment. The classic target is exactly the kind of single comparison in a PIN check: glitch the `beq` and the wrong branch executes. There is no software that is immune to a perfectly placed fault, but you can make the attacker's job exponentially harder:
+
+- **Redundant checks, separated in time.** Verify the critical condition more than once, using independent computations and independent variables, so a single glitch only corrupts one of them. The redundant flag check in the code above is this. A glitch that flips the first comparison still has to also defeat the second, independently computed one, in the same run.
+- **Make the safe state the easy state.** Initialize result variables to "deny" and require positive action to reach "grant," so a skipped instruction tends to leave you denied rather than granted. Sensitive booleans use non-trivial sentinel values (not `0` and `1`) so that a register zeroed by a fault does not read as a meaningful "true."
+- **Detect the impossible.** Insert checks for states that should never occur — a counter that decreased, a flow that reached a step out of order — and treat their occurrence as an attack, wiping secrets and halting.
+
+**Side-channel (power/EM) leakage.** When a chip computes, it consumes power in a pattern correlated with the data it is processing. Differential power analysis aggregates thousands of traces to extract a key one bit of correlation at a time. Our main structural defenses here were leaning on the hardware AES engine, whose fixed-function logic leaks far less exploitable structure than a software round function, and minimizing the number of operations that touched raw key material in the core at all — which is, conveniently, the same thing the derive-don't-store hierarchy already bought us. A key that only exists in RAM for a few microseconds and is then wiped offers a much smaller window for trace collection than one that is loaded and reloaded constantly. We also wiped intermediate buffers immediately after use, because a secret you have already erased cannot leak from a probe later.
+
+I want to be honest about the ceiling here. A team of one season, on a commodity core with no dedicated DPA countermeasures in silicon, does not produce a device that survives a well-funded laboratory attack. The realistic goal is to remove the cheap wins — the early-return timing leak, the single unguarded comparison, the fleet-wide key, the resettable counter — so that breaking the device costs real equipment and real time rather than a clever afternoon. That is what "hardening" means at this level: raising the cost, not claiming invulnerability.
+
+## What I would do differently
+
+A few things I am taking into the next build.
+
+**Treat the linker script and memory map as security artifacts from day one.** Where secrets live, where buffers sit relative to DMA-accessible regions, and what is readable after a soft reset all turned out to be security-relevant, and I was reasoning about them too late. On a core with no real MPU, layout *is* your isolation, and it deserves the same scrutiny as the crypto.
+
+**Build the constant-time and fault-injection test harness before the features.** I verified timing behavior and disassembly somewhat reactively, after writing the code. It should have been a gate: no comparison merges into the build until a test demonstrates its runtime is data-independent and a fault-simulation pass shows single-instruction skips land on deny. Catching a timing leak by reading disassembly is fine; catching it because a regression test went red is better.
+
+**Lean even harder on derivation.** There were still a couple of places where I cached a derived value "for performance" that, in retrospect, did not need caching and only widened the window a secret spent resident in memory. The instinct to compute-on-demand-and-wipe should win almost every one of those arguments on an HSM.
+
+**Plan the power-loss state machine explicitly.** Most of our hardest reasoning about the attacker yanking power happened around the PIN counter. It would have been cleaner to design every security-relevant state transition as power-loss-safe from the start — to enumerate, for each commit, what an attacker gains by interrupting it — rather than discovering those cases one at a time.
+
+The lasting lesson is the inversion I opened with. Network security trains you to keep the attacker at a distance. Embedded HSM work trains you to assume the distance is gone — the attacker has your chip on a bench, and your firmware has to keep its secrets anyway. Once you internalize that, you stop writing code that trusts the hardware, the timing, the power rail, or any single check. You write code that is still safe when one of those lies to you. That mindset is the most valuable thing I took away from the season, and it has changed how I read every system since.
+
+## References
+
+- [RFC 5869 — HMAC-based Extract-and-Expand Key Derivation Function (HKDF)](https://www.rfc-editor.org/rfc/rfc5869)
+- [RFC 2104 — HMAC: Keyed-Hashing for Message Authentication](https://www.rfc-editor.org/rfc/rfc2104)
+- [NIST FIPS 197 — Advanced Encryption Standard (AES)](https://csrc.nist.gov/pubs/fips/197/final)
+- [NIST FIPS 198-1 — The Keyed-Hash Message Authentication Code (HMAC)](https://csrc.nist.gov/pubs/fips/198-1/final)
+- [NIST FIPS 180-4 — Secure Hash Standard (SHA-256)](https://csrc.nist.gov/pubs/fips/180-4/final)
+- [NIST SP 800-38A — Recommendation for Block Cipher Modes of Operation (CBC)](https://csrc.nist.gov/pubs/sp/800/38/a/final)
+- [NIST FIPS 140-3 — Security Requirements for Cryptographic Modules](https://csrc.nist.gov/pubs/fips/140-3/final)
+- [MITRE Embedded Capture the Flag (eCTF)](https://ectf.mitre.org/)

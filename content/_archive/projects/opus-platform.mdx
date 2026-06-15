@@ -1,0 +1,43 @@
+---
+title: "Opus"
+year: "2026"
+role: "Design & Engineering"
+summary: "A file-based personal platform unifying writing, books, and work into one fast, static site."
+stack: ["Next.js", "TypeScript", "MDX", "Tailwind CSS"]
+tags: ["Web", "Content"]
+liveUrl: "https://opus.example"
+featured: true
+order: 1
+---
+
+Opus is the platform this very page lives on: a personal site that treats writing, reading notes, and project case studies as first-class content rather than database rows.
+
+## Problem
+
+Personal sites tend to fragment over time. Essays live in one tool, a reading log in another, and project write-ups in a third. Each surface has its own styling, its own deploy story, and its own way of going stale. I wanted a single home where every piece of content was just a file I could edit in my editor, version in Git, and ship without a CMS in the loop.
+
+The constraints were strict. Pages had to render fast as static HTML, the authoring format had to support rich components without breaking, and adding a new section could not require touching a build script.
+
+## Approach
+
+I built Opus on Next.js with MDX as the content layer. Every essay, book note, and project is an `.mdx` file with typed frontmatter. A small loader validates that frontmatter against a schema at build time, so a missing `title` or malformed `order` fails the build instead of shipping broken.
+
+Content is grouped by folder, and each folder maps to a route. Code blocks run through `rehype-pretty-code` for syntax highlighting with line numbers and titles, which made the case studies far more readable.
+
+```ts title="lib/content.ts" showLineNumbers
+import { z } from "zod";
+
+const FrontmatterSchema = z.object({
+  title: z.string(),
+  order: z.number(),
+  featured: z.boolean().default(false),
+});
+
+export type Frontmatter = z.infer<typeof FrontmatterSchema>;
+```
+
+Styling is handled with Tailwind CSS and a small set of typography tokens, so every surface shares one visual language. Because the whole site is static, the entire thing deploys to a CDN with no server to keep alive.
+
+## Outcome
+
+Publishing a new piece is now a matter of dropping a file into the right folder and pushing. Build times stay under a few seconds even as the content grows, and the typed frontmatter has caught several mistakes before they ever reached production. The unified design means a reader can move from an essay to a project without noticing a seam. Most importantly, the friction of writing dropped to near zero, which is the only metric that actually matters for a personal site.

@@ -1,0 +1,76 @@
+---
+title: "Migrating from Docker to Podman"
+date: "2026-02-27"
+excerpt: "How Podman's daemonless, rootless design maps onto your existing Docker workflow, plus the migration gotchas to expect."
+category: "DevOps"
+tags: ["Containers", "Podman", "DevOps"]
+author: "The Author"
+---
+
+Podman is a container engine that runs OCI containers without a long-running daemon. If you already know Docker, most of your muscle memory transfers directly. The architectural differences are what make the switch worth it.
+
+## Daemonless and rootless
+
+Docker relies on a central `dockerd` process running as root. Every container is a child of that daemon, which is a single point of failure and a meaningful attack surface. Podman has no daemon. Each `podman` command forks containers as direct child processes, and they can run entirely as your unprivileged user via user namespaces.
+
+Rootless mode means a container breakout lands the attacker in your unprivileged user account, not as root on the host. That is a real security improvement for many workloads.
+
+## Drop-in CLI compatibility
+
+Podman implements the same command surface as the Docker CLI. The simplest migration is an alias:
+
+```bash title="alias.sh" showLineNumbers
+alias docker=podman
+docker run --rm -p 8080:80 docker.io/library/nginx:latest
+```
+
+Note that Podman does not assume Docker Hub by default, so fully-qualified image names (`docker.io/library/nginx`) are the safer habit.
+
+## Pods, the namesake feature
+
+Podman can group containers into a **pod** that shares a network namespace, much like a Kubernetes pod. Containers in the same pod reach each other over `localhost`:
+
+```bash title="pod.sh" showLineNumbers {1,3}
+podman pod create --name web --publish 8080:80
+podman run -d --pod web --name app myorg/app:latest
+podman run -d --pod web docker.io/library/nginx:latest
+```
+
+## From containers to systemd with Quadlet
+
+Without a daemon to restart containers, you let the init system do it. Modern Podman integrates with systemd through **Quadlet**: you drop a declarative unit file and systemd generates a real service. Place a `.container` file in `~/.config/containers/systemd/`:
+
+```ini title="app.container" showLineNumbers {6,9}
+[Unit]
+Description=App container
+
+[Container]
+Image=myorg/app:latest
+PublishPort=8080:8080
+Environment=LOG_LEVEL=info
+
+[Install]
+WantedBy=default.target
+```
+
+Then reload and start it like any service:
+
+```bash title="enable.sh" showLineNumbers
+systemctl --user daemon-reload
+systemctl --user start app.service
+```
+
+Quadlet replaces the older `podman generate systemd` approach, which is now deprecated in favor of these unit files.
+
+## Migration gotchas
+
+A few things commonly trip people up:
+
+- **Image names:** add the registry prefix or configure `unqualified-search-registries` in `containers.conf`.
+- **Rootless ports:** binding ports below 1024 needs either a sysctl change or running rootful.
+- **Volume permissions:** user namespaces remap UIDs, so use the `:U` or `:Z` mount flags when files appear owned by the wrong user.
+- **Compose:** `podman-compose` exists, but `docker compose` against the Podman socket is often smoother for complex stacks.
+
+> Tip: Run `podman system migrate` after upgrades to refresh user-namespace settings for existing containers.
+
+For most teams the payoff is fewer privileged processes and clean integration with systemd. Start by aliasing the CLI, then move long-lived services to Quadlet units one at a time.

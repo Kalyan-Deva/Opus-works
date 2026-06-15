@@ -1,0 +1,66 @@
+---
+title: "eBPF for Runtime Security Observability"
+date: "2026-06-09"
+excerpt: "How eBPF delivers low-overhead, kernel-level visibility into syscalls and network activity to catch threats at runtime."
+category: "Security"
+tags: ["Security", "eBPF", "Linux"]
+author: "The Author"
+---
+
+eBPF has quietly become one of the most important technologies in Linux security. It lets you observe and react to what the kernel is doing in near real time, without the cost and fragility of older approaches.
+
+## What eBPF actually is
+
+eBPF (extended Berkeley Packet Filter) lets you run small, sandboxed programs inside the Linux kernel in response to events such as syscalls, network packets, or function entries. Before a program loads, an in-kernel verifier proves it is safe: bounded loops, no out-of-bounds memory access, and guaranteed termination. The program is then JIT-compiled to native code.
+
+The result is visibility that is both deep and cheap. You see kernel-level events directly, rather than inferring them from logs, and you do it with minimal overhead.
+
+## Why it matters for security
+
+Traditional runtime monitoring relied on kernel modules (risky, capable of crashing the host) or userspace polling (slow and easy to evade). eBPF avoids both:
+
+- **Low overhead.** Programs run in the kernel and only emit the events you ask for, so monitoring everything stays affordable.
+- **Hard to bypass.** Because instrumentation sits at the syscall and network layers, malicious code cannot easily hide its actual behavior from it.
+- **Broad visibility.** A single vantage point sees process execution, file access, and network connections across every container on a node.
+
+## What you can watch
+
+The high-signal sources for threat detection include:
+
+- **Syscalls:** process execution (`execve`), privilege changes, file opens in sensitive paths.
+- **Network activity:** new outbound connections, unexpected listening sockets, DNS lookups.
+- **Process lineage:** a web server spawning a shell, which is almost always malicious.
+
+## The tooling ecosystem
+
+You rarely write raw eBPF for security. Mature tools provide policy and detection on top of it:
+
+- **Falco** detects suspicious behavior against a rule set and can run on an eBPF probe.
+- **Tetragon** (from the Cilium project) does eBPF-based observability and can enforce policy by killing offending processes in-kernel.
+- **Cilium** brings eBPF to Kubernetes networking, including identity-aware network policy and observability with Hubble.
+
+## Try it yourself
+
+`bpftrace` is the quickest way to experiment. This one-liner prints every process execution on the system along with the invoking user, a simple but powerful audit feed:
+
+```bash title="exec-trace.sh" showLineNumbers
+bpftrace -e 'tracepoint:syscalls:sys_enter_execve {
+  printf("%s -> %s\n", username, str(args->filename));
+}'
+```
+
+For a policy-driven detection, a Falco rule can flag an outbound connection from a process that should never make one:
+
+```yaml title="falco_outbound.yaml" showLineNumbers
+- rule: Unexpected outbound from web server
+  desc: nginx should not initiate outbound connections
+  condition: outbound and proc.name = nginx
+  output: "Unexpected egress (cmd=%proc.cmdline dest=%fd.sip)"
+  priority: WARNING
+```
+
+> Tip: Start in alert-only mode. Tune rules against normal traffic for a week before enabling any enforcement, or you will drown in false positives and risk killing legitimate processes.
+
+## Summary
+
+eBPF gives security teams kernel-level, low-overhead, hard-to-evade visibility into the behaviors that matter. Pair `bpftrace` for exploration with Falco, Tetragon, or Cilium for production detection and enforcement, and you gain a real-time view of exactly what your workloads are doing.

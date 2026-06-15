@@ -1,0 +1,78 @@
+---
+title: "Least Privilege in the Cloud: IAM Done Right"
+date: "2026-04-21"
+excerpt: "Trim over-permissioned roles, kill wildcards, and replace long-lived keys with short-lived OIDC-federated credentials."
+category: "Security"
+tags: ["Security", "Cloud"]
+author: "The Author"
+---
+
+Cloud breaches rarely start with a clever exploit. They start with an over-permissioned identity and a leaked credential. Getting Identity and Access Management right is the highest-leverage security work most teams can do.
+
+## The problem with broad roles
+
+It is tempting to attach a broad managed policy or write `"Action": "*"` to make something work and move on. The result is an identity that can do far more than its job requires. When that credential leaks, through a committed key, a compromised laptop, or a vulnerable dependency, the attacker inherits all of it.
+
+Two anti-patterns dominate:
+
+- **Wildcards everywhere:** `s3:*` on `Resource: "*"` grants access to every bucket in the account.
+- **Reused roles:** one role shared across unrelated workloads, so each one carries the union of all their permissions.
+
+## Scope policies tightly
+
+The principle of least privilege means granting only the specific actions on the specific resources an identity actually needs. Start from nothing and add permissions as real usage demands them.
+
+```json title="s3-readonly.json" showLineNumbers {4-6,8}
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:ListBucket"],
+    "Resource": [
+      "arn:aws:s3:::reports-prod",
+      "arn:aws:s3:::reports-prod/*"
+    ],
+    "Condition": {
+      "StringEquals": { "aws:SourceVpce": "vpce-0abc123" }
+    }
+  }]
+}
+```
+
+Notice three things: the actions are an explicit short list, the resource is a named bucket rather than `*`, and a `Condition` further restricts access to traffic from a specific VPC endpoint. Conditions let you constrain by source IP, network, time, or MFA state.
+
+## Eliminate long-lived keys with OIDC federation
+
+Static access keys are the credential most likely to leak. Modern CI systems can avoid them entirely through OIDC federation: the pipeline presents a signed identity token, and the cloud exchanges it for short-lived credentials scoped to a specific role.
+
+For GitHub Actions to AWS, you add GitHub as an OIDC provider and let the workflow assume a role with no stored secret:
+
+```yaml title=".github/workflows/deploy.yml" showLineNumbers {6,9-11}
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::111122223333:role/ci-deploy
+          aws-region: us-east-1
+```
+
+The trust policy on `ci-deploy` should restrict which repository and branch may assume it, so a fork or unrelated repo cannot. Azure and Google Cloud offer equivalent workload identity federation.
+
+> Tip: Credentials that expire in minutes change the impact of a leak from a months-long incident to a non-event. Prefer federation over keys wherever your platform supports it.
+
+## Review access regularly
+
+Permissions accrete. Schedule access reviews and use tooling to find unused grants:
+
+1. Pull last-accessed data to find permissions no identity has exercised.
+2. Remove unused actions and detach orphaned policies.
+3. Confirm every human and machine identity still needs its role.
+
+## Summary
+
+Right-size every policy, replace wildcards with named actions and resources, add conditions, swap long-lived keys for OIDC-federated short-lived credentials, and review continuously. Least privilege is not a one-time project; it is a habit that quietly shrinks the blast radius of every future incident.

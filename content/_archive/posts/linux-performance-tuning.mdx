@@ -1,0 +1,79 @@
+---
+title: "Linux Performance Analysis with perf and bpftrace"
+date: "2026-04-28"
+excerpt: "Apply a repeatable methodology and modern tooling to find CPU and I/O bottlenecks on Linux."
+category: "Linux"
+tags: ["Linux", "Performance", "eBPF"]
+author: "The Author"
+---
+
+Performance problems are easy to guess at and hard to actually find. The cure is a methodology plus tools that show you what the system is really doing. This post walks through both, leaning on the work of Brendan Gregg, whose books and tools shaped modern Linux performance analysis.
+
+## Start with the USE method
+
+Brendan Gregg's **USE method** gives you a checklist instead of a hunch. For every resource (CPU, memory, disks, network), examine three things:
+
+- **Utilization**: how busy the resource is.
+- **Saturation**: how much extra work is queued and waiting.
+- **Errors**: any error counts.
+
+Walking the list keeps you from fixating on one metric while the real bottleneck sits elsewhere.
+
+## The tools tour
+
+Begin with broad observability tools and drill down:
+
+- `top` / `htop` for a live overview of CPU and memory per process.
+- `vmstat 1` for run-queue length, context switches, and swap activity.
+- `iostat -xz 1` for per-device disk utilization, await, and throughput.
+- `mpstat -P ALL 1` to spot a single saturated core hiding behind a low average.
+
+These ship in the `sysstat` and `procps` packages on most distributions and answer "is it CPU, memory, disk, or network?" within a minute.
+
+## Profiling with perf
+
+When CPU is the bottleneck, `perf` samples the call stacks of running code so you can see exactly where cycles go.
+
+```bash title="perf-profile.sh" showLineNumbers {2,5,8}
+# Sample the whole system at 99 Hz for 30 seconds
+sudo perf record -F 99 -a -g -- sleep 30
+
+# Summarize the captured profile
+sudo perf report --stdio
+
+# Count specific events live
+sudo perf stat -d ./my_program
+```
+
+The odd 99 Hz frequency avoids sampling in lockstep with timers that tick at round numbers like 100 Hz, which would bias results.
+
+## Flame graphs
+
+Raw `perf report` output is hard to read at scale. Brendan Gregg's **flame graphs** turn it into an interactive SVG where the x-axis is sample population and stack depth is the y-axis. Wide frames are where time is spent.
+
+```bash title="flamegraph.sh" showLineNumbers
+sudo perf record -F 99 -a -g -- sleep 30
+sudo perf script > out.perf
+# FlameGraph scripts from github.com/brendangregg/FlameGraph
+stackcollapse-perf.pl out.perf | flamegraph.pl > flame.svg
+```
+
+Open the SVG in a browser and click to zoom into any branch.
+
+## Going deeper with bpftrace
+
+`bpftrace` is a high-level front end to eBPF that lets you instrument the kernel and applications with short scripts, with very low overhead. It is ideal for questions the canned tools cannot answer.
+
+```bash title="bpftrace-examples.sh" showLineNumbers {2,5}
+# Histogram of block I/O sizes
+sudo bpftrace -e 'tracepoint:block:block_rq_issue { @bytes = hist(args->bytes); }'
+
+# Count which processes invoke a given syscall
+sudo bpftrace -e 'tracepoint:syscalls:sys_enter_openat { @[comm] = count(); }'
+```
+
+> Tip: The bcc and bpftrace projects ship dozens of ready-made tools such as `biolatency`, `execsnoop`, and `opensnoop` that answer common questions without writing a script.
+
+## Putting it together
+
+Walk the USE method to localize the bottleneck, confirm with `vmstat`/`iostat`, profile CPU paths with `perf` and flame graphs, and use `bpftrace` for targeted kernel-level questions. Measuring before changing keeps you honest and turns guesswork into evidence.

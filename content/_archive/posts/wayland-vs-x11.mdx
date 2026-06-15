@@ -1,0 +1,56 @@
+---
+title: "Wayland vs X11 in 2026"
+date: "2026-05-08"
+excerpt: "Understand the architectural and security differences driving Linux desktops toward Wayland, and the gaps that remain."
+category: "Linux"
+tags: ["Linux", "Desktop", "Wayland"]
+author: "The Author"
+---
+
+For decades the X Window System (X11) was the only realistic choice for a Linux desktop. Wayland has steadily matured into its successor, and many major distributions now ship Wayland sessions by default for the GNOME and KDE desktops. Understanding why means looking at how the two are built.
+
+## Two very different architectures
+
+X11 uses a central **X server** that sits between applications (clients) and the hardware. A separate window manager and compositor handle layout and effects, communicating with the X server over its protocol. This design dates to the 1980s, when transparent network display was the headline feature.
+
+Wayland collapses those roles. The **compositor is the display server**: a single process owns the screen, handles input, and composites windows. There is no separate X server. The Wayland protocol defines how clients talk to that compositor, and each desktop (Mutter for GNOME, KWin for KDE, plus standalone compositors like Sway) implements it directly.
+
+This consolidation removes layers of legacy indirection and an entire class of synchronization and tearing problems.
+
+## The security model
+
+The biggest practical difference is isolation. Under X11, any client can read input destined for any other window, capture the screen, or inject events. That made global hotkey daemons and screenshot tools trivial, but it also means a single compromised app can keylog everything.
+
+Wayland clients are isolated by default. An application cannot see another window's contents or grab input it was not given. This is a real security improvement, but it is also why some long-standing tools needed redesigning.
+
+## Why distros are defaulting to Wayland
+
+The momentum comes from several directions at once: better support for fractional scaling and mixed-DPI multi-monitor setups, smoother per-frame compositing without tearing, improved touch and gesture handling, and the cleaner security model. X11 development has largely shifted to maintenance, while active investment goes to Wayland.
+
+> Tip: To check what your session is using, inspect the session type environment variable: `echo $XDG_SESSION_TYPE` prints `wayland` or `x11`.
+
+## XWayland keeps old apps working
+
+Compatibility is handled by **XWayland**, an X server that runs as a Wayland client. Applications that only speak X11 connect to XWayland, which translates their requests for the Wayland compositor. From the user's perspective, legacy apps just work, often without realizing anything changed.
+
+```bash title="check-display.sh" showLineNumbers {2,5}
+# Current session type
+echo "$XDG_SESSION_TYPE"
+
+# List clients running through XWayland
+xlsclients
+```
+
+If `xlsclients` shows entries while you are in a Wayland session, those apps are riding on XWayland.
+
+## Remaining gaps
+
+Wayland is no longer experimental, but a few rough edges persist:
+
+- **Screen sharing and remote control** rely on PipeWire plus the XDG desktop portals. Modern apps support this, but configuration can still trip people up.
+- **Niche tools** that depend on global input grabbing or arbitrary screen capture, such as some automation and accessibility utilities, may need Wayland-native replacements.
+- **NVIDIA proprietary drivers** historically lagged, though support has improved substantially.
+
+## The takeaway
+
+For most desktop users in 2026, Wayland is the better default: more secure, smoother, and actively developed, with XWayland covering the long tail of older software. If you depend on a specific tool that still assumes X11 internals, verify it has a Wayland path before switching, but for the vast majority the transition is now seamless.

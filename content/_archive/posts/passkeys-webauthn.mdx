@@ -1,0 +1,73 @@
+---
+title: "Passkeys: Killing the Password with WebAuthn"
+date: "2026-02-12"
+excerpt: "How passkeys, WebAuthn, and FIDO2 deliver phishing-resistant login, and a minimal JavaScript example to register and authenticate."
+category: "Security"
+tags: ["Security", "Auth", "Web"]
+author: "The Author"
+---
+
+Passwords are the root of most account takeovers: they are reused, phished, and dumped in breaches. **Passkeys** replace them with public-key cryptography built on the **WebAuthn** API and the **FIDO2** standards. The result is login that is both easier and dramatically harder to phish.
+
+## How it works
+
+A passkey is a public/private key pair. The private key never leaves the user's device; only the public key is sent to your server during registration. Authentication is a challenge-response:
+
+1. The server sends a random **challenge**.
+2. The authenticator signs it with the private key, after a user gesture (biometric or PIN).
+3. The server verifies the signature against the stored public key.
+
+Because the signature is bound to the site's origin, a credential created for `example.com` simply will not work on a look-alike phishing domain. That origin binding is what makes passkeys **phishing-resistant** in a way that one-time codes never were.
+
+### Platform vs roaming authenticators
+
+- **Platform authenticators** are built into the device (Touch ID, Windows Hello, Android). Convenient and always present.
+- **Roaming authenticators** are external, like a hardware security key over USB or NFC. Portable across devices and ideal for high-assurance accounts.
+
+### Syncing
+
+Modern passkeys can **sync** through a provider's credential manager so a user who buys a new phone keeps their logins. Synced passkeys trade a little device-bound assurance for huge usability gains; **device-bound** passkeys (typically hardware keys) stay on one device for the strictest scenarios.
+
+## Registering a credential
+
+On the client, `navigator.credentials.create()` produces a new key pair. The challenge and IDs come from your server.
+
+```js title="register.js" showLineNumbers {3,9}
+const cred = await navigator.credentials.create({
+  publicKey: {
+    challenge: fromBase64(options.challenge), // random, from server
+    rp: { name: "Acme", id: "example.com" },
+    user: {
+      id: fromBase64(options.userId),
+      name: "ada@example.com",
+      displayName: "Ada Lovelace",
+    },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }], // ES256
+    authenticatorSelection: { userVerification: "required" },
+  },
+});
+// Send cred.response (attestation) to the server to store the public key
+```
+
+## Authenticating
+
+Login uses `navigator.credentials.get()` with a fresh challenge. The browser prompts for the user's gesture and returns a signed assertion.
+
+```js title="login.js" showLineNumbers {3}
+const assertion = await navigator.credentials.get({
+  publicKey: {
+    challenge: fromBase64(options.challenge), // fresh, single-use
+    rpId: "example.com",
+    userVerification: "required",
+  },
+});
+// Send assertion to the server; verify the signature against the stored key
+```
+
+Your server then verifies the signature, checks the origin and challenge, and confirms the signature counter to detect cloned authenticators.
+
+> Tip: Always generate the challenge server-side, store it tied to the session, and accept it exactly once. Reusable challenges reopen the door to replay attacks.
+
+## Rolling them out
+
+You do not have to delete passwords on day one. Offer passkeys as an additional login method, encourage enrollment after sign-in, and watch adoption. Over time, passkey-first flows let you retire passwords entirely, removing the single biggest source of credential theft from your application.

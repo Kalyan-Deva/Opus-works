@@ -1,0 +1,86 @@
+---
+title: "Bash Scripting Best Practices"
+date: "2026-03-24"
+excerpt: "Write Bash scripts that fail loudly, handle errors safely, and clean up after themselves."
+category: "Linux"
+tags: ["Linux", "Bash", "Scripting"]
+author: "The Author"
+---
+
+Bash is everywhere, which means a careless script can break a deployment, fill a disk, or silently corrupt data. The difference between a fragile one-off and a reliable tool is mostly discipline. Here are the practices that matter most.
+
+## Start strict
+
+The single highest-leverage habit is enabling strict mode at the top of every script:
+
+- `set -e` exits on the first command that fails.
+- `set -u` treats unset variables as errors instead of empty strings.
+- `set -o pipefail` makes a pipeline fail if any stage fails, not just the last one.
+
+Combined as `set -euo pipefail`, these turn silent bugs into immediate, visible failures.
+
+> Tip: `set -e` has well-known edge cases (it is ignored inside `if` conditions and some compound commands). Treat it as a safety net, not a substitute for checking return codes on operations you truly care about.
+
+## Quote everything
+
+Unquoted variables undergo word splitting and glob expansion. Always quote: `"$var"`, `"$@"`, and `"${array[@]}"`. Use `"$@"` (not `$*`) to forward arguments so each one stays intact even when it contains spaces.
+
+## Prefer `[[ ]]` over `[ ]`
+
+The `[[ ]]` keyword is a Bash builtin that avoids word-splitting surprises, supports `&&`/`||`, and offers pattern matching with `==` and regex with `=~`. Reserve the older `[ ]` (`test`) for POSIX `sh` scripts.
+
+## Clean up with traps
+
+A `trap` on `EXIT` guarantees cleanup runs whether the script succeeds, fails, or is interrupted. This is the right way to remove temp files or release locks.
+
+## A script template
+
+```bash title="deploy.sh" showLineNumbers {2,7,9,12}
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+tmpdir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
+
+main() {
+  local target="${1:?usage: deploy.sh <target>}"
+  log "Deploying to ${target}"
+  cp -r "${SCRIPT_DIR}/build" "${tmpdir}/"
+  # ... real work here ...
+}
+
+main "$@"
+```
+
+Note `${1:?...}`: it prints an error and exits if the first argument is missing, giving callers an immediate, clear message.
+
+## Use functions and `local`
+
+Wrap logic in functions and declare variables `local` so they do not leak into the global scope. A `main` function called at the bottom keeps top-level execution predictable and makes the script easy to read top-down.
+
+## Lint with ShellCheck
+
+[ShellCheck](https://www.shellcheck.net/) is the static analyzer every Bash author should run. It catches unquoted variables, useless `cat` pipelines, and dozens of subtle portability bugs.
+
+```bash title="lint.sh"
+shellcheck deploy.sh
+```
+
+Wire it into CI and your editor so problems surface before review.
+
+## Common pitfalls to avoid
+
+- Parsing `ls` output. Use globs or `find` instead.
+- Building paths by string concatenation without quoting.
+- Using `cd` without checking it succeeded (strict mode helps, but `cd somewhere || exit` is explicit).
+- Relying on `set -e` inside functions whose result you test; it is disabled there.
+
+Strict mode, quoting, traps, and ShellCheck together eliminate the large majority of real-world Bash bugs. Adopt them as defaults and your scripts become tools you can trust in production.

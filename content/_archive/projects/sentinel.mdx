@@ -1,0 +1,44 @@
+---
+title: "Sentinel"
+year: "2025"
+role: "Security Engineering"
+summary: "A low-overhead runtime security monitor that flags suspicious syscalls using eBPF."
+stack: ["Go", "eBPF", "Falco"]
+tags: ["Security", "Observability"]
+repoUrl: "https://github.com/example/sentinel"
+featured: true
+order: 2
+---
+
+Sentinel watches what processes actually do at runtime, flagging suspicious system calls in production without the overhead of traditional agents.
+
+## Problem
+
+Most host security tooling falls into two camps. Userland agents that poll process tables are easy to deploy but blind to anything that happens between polls, and they impose real CPU cost. Kernel modules see everything but are fragile, hard to ship, and capable of taking a host down if they panic.
+
+The goal was a monitor that could observe syscall activity across a fleet with single-digit-percent overhead, deploy as an ordinary binary, and never put kernel stability at risk. It also needed to express detection rules in a form the security team could read and edit without recompiling.
+
+## Approach
+
+Sentinel uses eBPF to attach probes to syscall entry points in the kernel. The probes run in the kernel's verified sandbox, so a bad rule cannot crash the host, and events are streamed to userland through a ring buffer. A Go control plane loads the probes, enriches raw events with process and container metadata, and evaluates them against a rule set.
+
+Rather than invent a new rule language, Sentinel speaks Falco rules, which the team already knew. A rule that flags a shell spawned inside a container is just a condition over the enriched event stream.
+
+```go title="monitor/ringbuf.go" showLineNumbers
+for {
+    record, err := reader.Read()
+    if err != nil {
+        continue
+    }
+    evt := decode(record.RawSample)
+    if engine.Match(evt) {
+        alerts <- evt
+    }
+}
+```
+
+To keep overhead low, filtering happens in the kernel where possible, so uninteresting events never cross into userland. Only events matching a coarse pre-filter pay the cost of a copy and full evaluation.
+
+## Outcome
+
+In a staging fleet, Sentinel held steady at roughly two percent CPU overhead under load while catching the test cases that the previous polling agent missed entirely, including a short-lived reverse shell. Because detection rules are plain text, the security team now ships new rules through a Git review without involving the platform team, which collapsed the turnaround on new threat coverage from days to minutes.

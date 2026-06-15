@@ -1,0 +1,38 @@
+---
+title: "MQTT Broker DoS: Infrastructure Attack & Resilience Analysis"
+year: "2025"
+role: "Security Researcher"
+summary: "Stood up a hardened MQTT broker on a Raspberry Pi 4, then drove it to complete outage with three custom denial-of-service vectors — and documented the fixes."
+stack: ["Python", "Mosquitto", "Raspberry Pi 4", "Linux"]
+tags: ["IoT Security", "Denial of Service", "Networking"]
+featured: true
+order: 3
+---
+
+## Problem
+
+MQTT is the messaging backbone of much of the IoT world, but brokers are often
+deployed with little thought to adversarial load. I wanted to measure exactly how
+a realistic broker holds up under attack — and turn that into a repeatable
+runbook.
+
+## Approach
+
+I deployed a full Mosquitto MQTT broker environment on a Raspberry Pi 4 with
+authentication, ACLs, rate limiting, and a defined client topology to establish a
+controlled baseline. Then I executed three attack vectors with custom Python
+scripts:
+
+- **Retained-message flood** — abusing retained messages to exhaust memory.
+- **Wildcard topic storm** — forcing expensive subscription matching across the
+  topic tree.
+- **Session exhaustion** — opening and abandoning sessions to consume broker
+  state.
+
+## Outcome
+
+Under load, the broker's memory climbed from roughly 600 MB to 8 GB and traffic
+went from under 1 Mbit/s to 600–700 Mbit/s, producing a complete broker outage
+lasting about 49 minutes. I isolated the root cause behind each vector, applied
+targeted mitigations, and documented the full attack-to-remediation cycle as a
+reproducible runbook — the kind of artifact a blue team can actually act on.

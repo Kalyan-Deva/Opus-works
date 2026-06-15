@@ -1,0 +1,68 @@
+---
+title: "The OWASP Top 10, Explained for Builders"
+date: "2026-01-08"
+excerpt: "A practical tour of the OWASP Top 10 risk categories with concrete, developer-facing mitigations you can apply today."
+category: "Security"
+tags: ["Security", "Web", "AppSec"]
+author: "The Author"
+---
+
+The OWASP Top 10 is the industry's shared shortlist of the most critical web application risks. It is not a checklist of bugs but a set of risk *categories*. Here is how to think about each one as a builder, with mitigations you can ship.
+
+## The ten categories
+
+1. **Broken access control** — users acting outside their permissions. The most common root cause of real breaches.
+2. **Cryptographic failures** — weak or missing encryption, hardcoded keys, plaintext secrets.
+3. **Injection** — untrusted input interpreted as code or query (SQL, OS commands, LDAP).
+4. **Insecure design** — missing threat modeling and secure-by-design patterns.
+5. **Security misconfiguration** — default creds, verbose errors, open buckets.
+6. **Vulnerable and outdated components** — unpatched dependencies.
+7. **Identification and authentication failures** — weak sessions, credential stuffing.
+8. **Software and data integrity failures** — unverified updates and CI/CD artifacts.
+9. **Security logging and monitoring failures** — breaches you never detect.
+10. **Server-side request forgery (SSRF)** — the server fetching attacker-chosen URLs.
+
+## Two mitigations worth coding right now
+
+### Stop injection with parameterized queries
+
+Never concatenate user input into a query string. Bind parameters instead so the driver treats input as data, never code.
+
+```ts title="users.ts" showLineNumbers {4}
+import { pool } from "./db";
+
+// Safe: the value is bound, not interpolated
+const rows = await pool.query(
+  "SELECT id, email FROM users WHERE email = $1",
+  [req.body.email]
+);
+```
+
+### Enforce access control on the server
+
+Authorization decisions belong on the server, checked on *every* request. Deny by default and verify ownership, not just authentication.
+
+```ts title="authz.ts" showLineNumbers {5}
+async function getDocument(userId: string, docId: string) {
+  const doc = await db.documents.findById(docId);
+  if (!doc) throw new NotFoundError();
+  // Verify the caller actually owns the resource
+  if (doc.ownerId !== userId) throw new ForbiddenError();
+  return doc;
+}
+```
+
+## Cross-cutting habits
+
+A few practices push down risk across multiple categories at once:
+
+- **Pin and patch dependencies.** Use a lockfile and run a scanner (`npm audit`, `pip-audit`, Dependabot) in CI to address category 6.
+- **Manage secrets properly.** Keep keys in a vault or platform secret store, never in source control, addressing category 2.
+- **Validate and allowlist outbound URLs** to blunt SSRF; block requests to internal IP ranges and cloud metadata endpoints.
+- **Log security-relevant events** (auth, access-control denials, input validation failures) with enough context to investigate, then alert on anomalies.
+
+> Tip: Threat-model early. A 30-minute "how could this be abused?" session during design prevents the insecure-design problems that no amount of later patching fully fixes.
+
+## Where to go next
+
+The full OWASP project pages list cheat sheets and test cases for each category. Treat the Top 10 as a starting prioritization, not a finish line. Pair it with the OWASP Application Security Verification Standard (ASVS) when you need concrete, testable requirements for a given assurance level. The goal is not to memorize ten names but to build the reflexes: deny by default, never trust input, and verify everything on the server.

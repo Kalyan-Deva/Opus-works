@@ -1,0 +1,99 @@
+---
+title: "Mastering systemd Units"
+date: "2026-01-12"
+excerpt: "A practical tour of systemd unit types, dependencies, restart policies, timers, and sandboxing directives for modern Linux administration."
+category: "Linux"
+tags: ["Linux", "systemd", "SysAdmin"]
+author: "The Author"
+---
+
+systemd is the init system and service manager on nearly every mainstream Linux distribution. At its core it manages *units* — declarative objects that describe services, timers, sockets, mounts, and more. Understanding units is the single highest-leverage skill for day-to-day Linux administration.
+
+## Unit types you actually use
+
+- **`.service`** — a long-running process or one-shot command.
+- **`.timer`** — schedules another unit, a modern replacement for cron.
+- **`.socket`** — listens on a socket and activates a service on first connection.
+- **`.target`** — a grouping/synchronization point (the rough equivalent of runlevels).
+
+## Writing a service unit
+
+Drop custom units in `/etc/systemd/system/`. Here is a minimal but production-shaped service with restart and sandboxing.
+
+```ini title="myapp.service" showLineNumbers {3,12,16-18}
+[Unit]
+Description=My App API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/myapp --port 8080
+User=myapp
+Restart=on-failure
+RestartSec=5s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/myapp
+
+[Install]
+WantedBy=multi-user.target
+```
+
+After editing, reload the manager and enable the unit:
+
+```bash title="deploy.sh" showLineNumbers
+sudo systemctl daemon-reload
+sudo systemctl enable --now myapp.service
+systemctl status myapp.service
+```
+
+## Dependencies: After, Wants, Requires
+
+These directives are often confused. `After=` and `Before=` control **ordering** only. `Wants=` and `Requires=` create **dependency** relationships:
+
+- `Wants=foo` — start `foo`, but continue even if it fails (soft).
+- `Requires=foo` — if `foo` fails to start, this unit also fails (hard).
+
+Ordering and requirement are orthogonal — you usually want both `After=` and `Wants=` together, as in the example above.
+
+## Restart policy
+
+`Restart=on-failure` restarts only on non-zero exit or signal. Other useful values are `always`, `on-abnormal`, and `no`. Pair with `RestartSec=` to avoid hot-restart loops, and tune `StartLimitIntervalSec`/`StartLimitBurst` in the `[Unit]` section to give up after repeated crashes.
+
+## Timers vs cron
+
+Timers integrate with the journal, support dependencies, handle missed runs with `Persistent=true`, and survive reboots cleanly. A timer pairs with a same-named `.service`:
+
+```ini title="backup.timer" showLineNumbers
+[Unit]
+Description=Nightly backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Inspect scheduled timers with `systemctl list-timers`.
+
+## Observing and debugging
+
+`systemctl` controls state; `journalctl` reads logs. The two commands you reach for constantly:
+
+```bash title="observe.sh" showLineNumbers
+systemctl status myapp.service
+journalctl -u myapp.service -f
+```
+
+## Sandboxing matters
+
+The hardening directives above are not optional extras. `NoNewPrivileges=true` blocks setuid escalation, and `ProtectSystem=strict` mounts the entire filesystem read-only except paths you explicitly allow via `ReadWritePaths=`. Audit a unit's exposure with `systemd-analyze security myapp.service`, which scores each directive.
+
+> Tip: Run `systemd-analyze security` after every unit change. A score above 9.0 means you have real attack surface left to trim.
+
+Once units, dependencies, and sandboxing click, systemd stops being a black box and becomes the most reliable tool in your kit.

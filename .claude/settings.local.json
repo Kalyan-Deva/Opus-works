@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:godaylight.com)",
+      "Bash(npm run *)",
+      "Bash(npm start *)"
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+---
+title: "Atlas"
+year: "2024"
+role: "Full-stack"
+summary: "A versioned documentation platform with full-text search and a Git-backed editing workflow."
+stack: ["Next.js", "PostgreSQL", "MDX"]
+tags: ["Web", "Docs"]
+liveUrl: "https://atlas.example"
+featured: false
+order: 4
+---
+
+Atlas is a documentation platform that lets teams edit docs through their normal Git workflow while readers get fast pages and search that actually finds things.
+
+## Problem
+
+Internal documentation rots when the writing experience fights the way engineers already work. Wiki tools with proprietary editors sit outside code review, so docs drift from the code they describe. Pure static-site generators keep docs in Git but usually ship weak search and no notion of versions, so readers on an older release see instructions that no longer apply.
+
+The brief was to combine a Git-backed authoring flow with versioned content and search good enough that people stopped pinging colleagues for answers already written down.
+
+## Approach
+
+Docs are authored as MDX files in a repository, so every change goes through pull requests and review like any other code. On merge, a pipeline ingests the changed files, renders them, and writes the content plus metadata into PostgreSQL keyed by version. The frontend is a Next.js app that reads from Postgres and renders statically where it can.
+
+Search uses Postgres full-text search rather than a separate engine, which kept the infrastructure to a single database. Each document is indexed into a `tsvector`, and queries rank results by relevance within the selected version.
+
+```sql title="search.sql" showLineNumbers
+SELECT slug, title,
+       ts_rank(search_vector, query) AS rank
+FROM documents, plainto_tsquery('english', $1) query
+WHERE search_vector @@ query
+  AND version = $2
+ORDER BY rank DESC
+LIMIT 20;
+```
+
+Versions are first-class. A reader can pin the docs to the release they run, and the search and navigation scope to that version, so they never follow instructions written for software they do not have.
+
+## Outcome
+
+Because editing lives inside pull requests, docs now change in the same commit as the code they describe, and reviewers catch stale instructions before merge. Folding search into Postgres meant no extra service to operate, and ranked full-text results return in tens of milliseconds. Versioned content removed a whole category of support questions from teams still on older releases. Documentation stopped being a separate chore and became part of shipping.

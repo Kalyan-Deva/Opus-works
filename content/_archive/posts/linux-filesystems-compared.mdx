@@ -1,0 +1,57 @@
+---
+title: "Btrfs vs ZFS vs ext4: Choosing a Linux Filesystem"
+date: "2026-03-02"
+excerpt: "A practical comparison of ext4, Btrfs, and ZFS — weighing simplicity, snapshots, data integrity, and memory needs to pick the right filesystem."
+category: "Linux"
+tags: ["Linux", "Filesystems", "Storage"]
+author: "The Author"
+---
+
+Choosing a filesystem is choosing a set of tradeoffs. ext4 is boring and bulletproof; Btrfs and ZFS are copy-on-write powerhouses with snapshots, checksums, and volume management built in. The right choice depends on what you value — simplicity, data integrity, or flexibility.
+
+## ext4: the dependable default
+
+ext4 is the journaling filesystem that most distributions still install by default. It is mature, extremely well tested, fast for ordinary workloads, and has excellent recovery tooling (`fsck.ext4`). What it lacks is the modern feature set: no native snapshots, no checksums for data blocks, and no built-in volume management. You pair it with LVM and mdadm when you need those. For a laptop, a single-disk server, or anywhere predictability beats features, ext4 is a perfectly rational choice.
+
+## Btrfs: snapshots and subvolumes
+
+Btrfs brings **copy-on-write (CoW)**, which means a write never overwrites live data in place — it writes new blocks and updates pointers. This makes **snapshots** nearly free: a snapshot just pins the current block tree. **Subvolumes** let you carve independent, snapshottable filesystem trees out of one pool, which is why tools like Snapper can roll back a system update in seconds. Btrfs also checksums both data and metadata, so it detects silent corruption. Its multi-device RAID is solid for RAID 0/1/10; the parity modes (5/6) are still considered less battle-tested.
+
+## ZFS: integrity above all
+
+ZFS was designed around end-to-end **data integrity**. Every block is checksummed, and on a redundant pool ZFS *self-heals* — it detects a bad block and rewrites it from a good copy during a scrub. Its **RAID-Z** levels survive one, two, or three disk failures. The cost is **memory**: ZFS uses the ARC cache aggressively and benefits from generous RAM, and licensing (CDDL) keeps it out of the mainline kernel, so it ships as a separate module via OpenZFS.
+
+## Side-by-side
+
+| Feature | ext4 | Btrfs | ZFS |
+| --- | --- | --- | --- |
+| Copy-on-write | No | Yes | Yes |
+| Snapshots | No (needs LVM) | Yes, native | Yes, native |
+| Data checksums | No | Yes | Yes |
+| Built-in RAID | No (mdadm) | 0/1/10 stable | RAID-Z 1/2/3 |
+| In mainline kernel | Yes | Yes | No (OpenZFS) |
+| RAM appetite | Low | Low-moderate | High |
+| Best for | Simplicity | Linux desktops/rollbacks | Storage/NAS integrity |
+
+## Snapshots in practice
+
+The killer feature of both CoW filesystems is the instant snapshot. Btrfs:
+
+```bash title="btrfs-snapshot.sh" showLineNumbers
+# Read-only snapshot of a subvolume before a risky upgrade
+sudo btrfs subvolume snapshot -r /home /home/.snap/home-2026-03-02
+sudo btrfs subvolume list /
+```
+
+The ZFS equivalent is just as quick:
+
+```bash title="zfs-snapshot.sh" showLineNumbers
+sudo zfs snapshot tank/home@2026-03-02
+sudo zfs rollback tank/home@2026-03-02   # revert if the upgrade goes wrong
+```
+
+> Tip: Snapshots are not backups. They live on the same pool, so a failed disk takes them with it. Use `btrfs send` or `zfs send` to replicate snapshots to a separate machine.
+
+## Picking one
+
+Use **ext4** when you want zero surprises and minimal moving parts. Use **Btrfs** when you want cheap snapshots and rollbacks on a Linux desktop or single-node server. Use **ZFS** when data integrity and large redundant pools justify the RAM and the out-of-tree module. None is wrong — match the filesystem to what the machine is actually for.

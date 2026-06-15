@@ -1,0 +1,65 @@
+---
+title: "PostgreSQL Performance: Indexes, Plans, and Vacuum"
+date: "2026-05-11"
+excerpt: "Reading query plans, choosing the right indexes, and understanding vacuum so your Postgres stays fast under load."
+category: "Engineering"
+tags: ["PostgreSQL", "Databases", "Performance"]
+author: "The Author"
+---
+
+Most Postgres performance problems come down to three things: the planner is choosing a bad path, the right index does not exist, or dead rows are piling up. Here is how to diagnose and fix each.
+
+## Read the plan with EXPLAIN ANALYZE
+
+`EXPLAIN` shows the planner's intended strategy; `EXPLAIN ANALYZE` actually runs the query and reports real timings and row counts. The gap between estimated and actual rows is where trouble hides.
+
+```sql title="explain.sql" showLineNumbers {1,4}
+EXPLAIN ANALYZE
+SELECT * FROM orders
+WHERE customer_id = 42
+ORDER BY created_at DESC;
+-- Seq Scan on orders  (cost=0.00..18500 rows=120 width=64)
+--   (actual time=0.3..210 rows=118 loops=1)  <- 210ms scanning everything
+```
+
+A `Seq Scan` over a large table to find a few rows is the classic smell. The fix is usually an index. After adding one you want to see an `Index Scan` instead, and a dramatically lower actual time.
+
+## When indexes help
+
+- **B-tree:** the default, ideal for equality and range predicates and for `ORDER BY`.
+- **Partial:** index only the rows you query, e.g. active records, to keep it small and fast.
+- **Composite:** one index over multiple columns; column order matters and should match your filter and sort.
+- **Covering:** add columns with `INCLUDE` so the query is answered from the index alone (an index-only scan), avoiding a heap fetch.
+
+```sql title="indexes.sql" showLineNumbers {2,5}
+-- Composite + covering for the query above
+CREATE INDEX idx_orders_cust_created
+  ON orders (customer_id, created_at DESC) INCLUDE (status);
+
+-- Partial: only index orders that are still open
+CREATE INDEX idx_orders_open
+  ON orders (customer_id) WHERE status = 'open';
+```
+
+## N+1 and seq scans
+
+An N+1 pattern, one query for a list plus one per row, hammers the database with hundreds of tiny round trips. Fix it at the application layer with a `JOIN` or an `IN (...)` batch, not with more indexes. And remember that a seq scan is not always wrong: for small tables or queries returning a large fraction of rows, scanning is genuinely faster than an index lookup, and the planner knows it.
+
+## Autovacuum and bloat
+
+Postgres uses MVCC: an `UPDATE` or `DELETE` does not overwrite a row, it marks the old version dead and writes a new one. Those dead tuples accumulate as **bloat**, slowing scans and inflating disk usage. Autovacuum reclaims them in the background and updates the statistics the planner relies on.
+
+```sql title="vacuum.sql" showLineNumbers {3}
+-- Inspect dead rows and last autovacuum time
+SELECT relname, n_dead_tup, last_autovacuum
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC;
+```
+
+For write-heavy tables, tune autovacuum to run more aggressively rather than disabling it. Run `ANALYZE` after large bulk loads so the planner has fresh statistics.
+
+> Tip: Stale statistics cause bad row estimates, which cause bad plans. If `EXPLAIN ANALYZE` shows estimated rows wildly off from actual, run `ANALYZE` on the table first.
+
+## Connection pooling
+
+Each Postgres connection is a backend process with real memory cost. Hundreds of direct connections from an app server will exhaust the server. Put a pooler such as PgBouncer in front in transaction-pooling mode so many clients share a small set of backend connections. This is often the single biggest win for high-concurrency workloads.

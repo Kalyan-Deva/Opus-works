@@ -1,0 +1,70 @@
+---
+title: "Preventing Injection Attacks in Modern Apps"
+date: "2026-04-09"
+excerpt: "How SQL and command injection happen, and how parameterized queries, validation, and allowlists reliably stop them."
+category: "Security"
+tags: ["Security", "Web", "AppSec"]
+author: "The Author"
+---
+
+Injection has remained near the top of the OWASP risk lists for years, and for good reason: it is easy to introduce and devastating to exploit. The root cause is always the same. Untrusted input is mixed with code or a query so the interpreter executes attacker-controlled instructions.
+
+## How SQL injection happens
+
+The classic mistake is building a query by concatenating strings. If user input flows directly into the SQL text, an attacker can change the meaning of the query.
+
+```python title="vulnerable.py" showLineNumbers {3}
+def get_user(conn, username):
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE name = '" + username + "'")
+    return cursor.fetchone()
+```
+
+Passing `' OR '1'='1` as the username turns the `WHERE` clause into something always true, dumping every row. A `; DROP TABLE users; --` payload can be far worse.
+
+### The fix: parameterized queries
+
+Use placeholders and let the driver bind values separately from the query text. The database treats the input strictly as data, never as SQL.
+
+```python title="fixed.py" showLineNumbers {3}
+def get_user(conn, username):
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE name = %s", (username,))
+    return cursor.fetchone()
+```
+
+The highlighted line is the entire fix. The structure of the statement is fixed before any user data is involved, so `' OR '1'='1` is matched literally as a username and finds nothing.
+
+ORMs such as SQLAlchemy, Hibernate, and Prisma parameterize by default, which is a strong reason to use them. Just be careful with raw-query escape hatches, which can reintroduce the flaw.
+
+## Command injection
+
+The same pattern appears when you pass input into a shell. Spawning a command through a shell string lets metacharacters like `;`, `|`, and `&&` chain extra commands.
+
+```python title="vulnerable_cmd.py" showLineNumbers {2}
+import os
+os.system("ping -c 1 " + host)   # host = "8.8.8.8; rm -rf /"
+```
+
+### The fix: avoid the shell, pass an argument list
+
+```python title="fixed_cmd.py" showLineNumbers {2}
+import subprocess
+subprocess.run(["ping", "-c", "1", host], shell=False, check=True)
+```
+
+With `shell=False` and an argument vector, `host` is a single argument to `ping`. There is no shell to interpret metacharacters, so the injection simply fails.
+
+## Defense in depth
+
+Parameterization is the primary control, but layer additional defenses:
+
+- **Input validation with allowlists.** Define what valid input looks like and reject everything else. Allowlists (only known-good values) are far stronger than denylists (trying to block known-bad), which attackers routinely evade through encoding.
+- **Least privilege at the data layer.** The application database account should not own tables or have administrative rights, limiting damage if something slips through.
+- **Output encoding** for the destination context, which is the analogous fix for cross-site scripting.
+
+> Tip: Never sanitize by escaping quotes yourself. Hand the separation of code and data to the driver or a vetted library, which handles edge cases you will not think of.
+
+## Summary
+
+Injection is fully preventable. Keep untrusted data out of the interpreter's instruction stream by binding parameters, avoid building shell strings, validate against allowlists, and run with least privilege. Apply these consistently and an entire class of high-severity bugs disappears from your codebase.

@@ -1,0 +1,63 @@
+---
+title: "Preparing for Post-Quantum Cryptography"
+date: "2026-02-24"
+excerpt: "Why quantum computers threaten RSA and ECC, what the NIST PQC standards offer, and how to start a crypto-agile migration."
+category: "Security"
+tags: ["Security", "Cryptography"]
+author: "The Author"
+---
+
+Most of today's public-key cryptography rests on math that a large quantum computer could break. The machines do not exist at scale yet, but the migration is already urgent. This post explains the threat and the standards designed to counter it.
+
+## The quantum threat
+
+The public-key algorithms securing the internet, **RSA** and elliptic-curve cryptography (**ECC**), rely on the hardness of integer factorization and the discrete logarithm problem. **Shor's algorithm**, run on a sufficiently powerful quantum computer, solves both efficiently. That would break RSA key exchange, ECDH, and ECDSA signatures.
+
+Symmetric cryptography is far less affected. Grover's algorithm offers only a quadratic speedup, so doubling key sizes (for example, using AES-256) restores the margin. The public-key layer is where the real work lies.
+
+### Harvest now, decrypt later
+
+You cannot wait for quantum computers to arrive. An adversary can **record encrypted traffic today** and decrypt it years later once the hardware exists. Any data with a long confidentiality lifetime, health records, state secrets, long-lived credentials, is already at risk. This is why migration timelines are measured against *when your data stops being sensitive*, not when quantum computers ship.
+
+## The NIST standards
+
+After a multi-year competition, NIST standardized a first set of post-quantum algorithms:
+
+- **ML-KEM** (FIPS 203), derived from **CRYSTALS-Kyber**, a key-encapsulation mechanism for establishing shared keys.
+- **ML-DSA** (FIPS 204), derived from **CRYSTALS-Dilithium**, a lattice-based digital signature scheme.
+- **SLH-DSA** (FIPS 205), a stateless hash-based signature scheme (SPHINCS+) offering a conservative, non-lattice alternative.
+
+These are based on problems believed hard for both classical and quantum computers.
+
+## Hybrid key exchange
+
+Because the new schemes are relatively young, the prudent transition uses **hybrid** key exchange: combine a classical algorithm with a post-quantum one so the connection is safe if *either* holds. TLS deployments increasingly negotiate a hybrid group such as X25519 combined with ML-KEM.
+
+```bash title="check-pqc.sh" showLineNumbers {2}
+# Inspect which key-exchange group a TLS server negotiated
+openssl s_client -connect example.com:443 -groups X25519MLKEM768 \
+  </dev/null 2>/dev/null | grep -i "Negotiated"
+```
+
+## Crypto-agility
+
+The lasting lesson is **crypto-agility**: build systems so you can swap algorithms without re-architecting. That means no hardcoded algorithm identifiers, key sizes negotiated rather than assumed, and a clean abstraction between your application and the primitives it calls.
+
+```yaml title="crypto-policy.yaml" showLineNumbers {3}
+key_exchange:
+  preferred:
+    - x25519_mlkem768   # hybrid: classical + post-quantum
+    - x25519            # fallback during transition
+```
+
+## A migration playbook
+
+1. **Inventory** where you use RSA/ECC: TLS, code signing, VPNs, stored secrets, embedded devices.
+2. **Prioritize** by data lifetime; protect long-lived secrets first.
+3. **Adopt hybrid** key exchange where libraries support it.
+4. **Refactor for agility** so future swaps are configuration, not rewrites.
+5. **Track upstream** support in your TLS stack, HSMs, and dependencies.
+
+> Tip: You almost certainly do not implement these primitives yourself. Your job is inventory and agility, then upgrading the well-vetted libraries that do the math for you.
+
+The quantum era is a question of *when*, not *if*. Starting the inventory now is the cheapest move you will ever make against it.

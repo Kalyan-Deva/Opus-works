@@ -1,0 +1,85 @@
+---
+title: "Container Security: From Image to Runtime"
+date: "2026-03-17"
+excerpt: "A practical walkthrough of hardening containers across the lifecycle, from minimal base images to runtime detection."
+category: "Security"
+tags: ["Security", "Containers", "DevOps"]
+author: "The Author"
+---
+
+Container security is not a single control; it spans the image you build, the way you run it, and what you observe at runtime. Treat each layer as defense in depth.
+
+## Start with a minimal base
+
+Every package in your image is potential attack surface. Prefer distroless or minimal images so there is no shell, package manager, or unnecessary library for an attacker to abuse. Pin images by digest rather than a floating tag so builds are reproducible.
+
+## A hardened Dockerfile
+
+```dockerfile title="Dockerfile" showLineNumbers {7,12,14}
+FROM golang:1.22 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /app ./cmd/server
+
+# Distroless: no shell, no package manager
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /
+COPY --from=build /app /app
+# Drop to a non-root, fixed UID
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/app"]
+```
+
+The multi-stage build keeps the toolchain out of the final image. Running as a non-root UID limits the blast radius if the process is compromised.
+
+## Scan before you ship
+
+Scan images for known vulnerabilities in CI and fail the build on high-severity findings. Trivy and Grype are both well-established open-source scanners.
+
+```bash title="scan.sh" showLineNumbers
+trivy image --severity HIGH,CRITICAL --exit-code 1 myorg/app:latest
+grype myorg/app:latest --fail-on high
+```
+
+## Lock down the runtime
+
+Even a perfect image can be run insecurely. In Kubernetes, set a strict `securityContext` so the container cannot escalate privileges, writes to a read-only filesystem, and drops all Linux capabilities it does not need.
+
+```yaml title="deployment.yaml" showLineNumbers {4,6,8,10}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+```
+
+A few principles behind that snippet:
+
+- **Least-privilege capabilities:** drop `ALL`, then add back only what is required (rarely anything for a typical web service).
+- **Read-only root filesystem:** mount an `emptyDir` for any path that genuinely needs writes.
+- **Seccomp:** `RuntimeDefault` blocks dangerous syscalls. AppArmor or SELinux profiles add mandatory access control on top.
+
+> Tip: A container that needs `CAP_NET_BIND_SERVICE` to bind port 80 is better off binding a high port and letting the service or ingress map it, so you can keep dropping all capabilities.
+
+## Detect at runtime
+
+Static controls cannot catch every novel behavior. Runtime detection tools watch syscalls and flag suspicious activity such as a shell spawning inside a container or an unexpected outbound connection.
+
+Falco is the de facto open-source choice. A rule like the one below alerts when a shell is executed in a running container, which is almost always a sign of a problem in a hardened deployment:
+
+```yaml title="falco_rule.yaml" showLineNumbers
+- rule: Shell in container
+  desc: Detect a shell spawned inside a container
+  condition: container and proc.name in (bash, sh, zsh)
+  output: "Shell spawned (user=%user.name container=%container.name)"
+  priority: WARNING
+```
+
+## Putting it together
+
+Build minimal, run as non-root, scan in CI, enforce a strict `securityContext`, and watch runtime behavior. No single layer is sufficient, but together they make a compromised container expensive and noisy for an attacker, which is exactly the goal.

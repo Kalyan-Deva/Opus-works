@@ -1,0 +1,73 @@
+---
+title: "The Linux Boot Process, Step by Step"
+date: "2026-02-07"
+excerpt: "Follow a Linux system from firmware through bootloader, kernel, initramfs, and PID 1 to a fully booted target — and learn to measure each stage."
+category: "Linux"
+tags: ["Linux", "Kernel", "Boot"]
+author: "The Author"
+---
+
+Booting a Linux machine is a relay race: each stage does just enough to hand control to the next. Knowing the handoffs turns "it won't boot" from a mystery into a checklist.
+
+## 1. Firmware: UEFI or BIOS
+
+When you power on, the firmware runs first. Modern systems use **UEFI**, which reads an EFI System Partition (ESP, a small FAT filesystem) and executes a `.efi` boot application directly. Legacy **BIOS** instead loads 512 bytes of boot code from the MBR. UEFI also enforces Secure Boot, verifying that the bootloader is signed before running it.
+
+## 2. Bootloader: GRUB or systemd-boot
+
+The firmware launches a bootloader. **GRUB** is the flexible, scriptable classic; **systemd-boot** is a minimal UEFI-only alternative that just picks a kernel and boots it. The bootloader's job is to load two files into memory and jump to the kernel:
+
+- the kernel image (`vmlinuz`)
+- the **initramfs**
+
+It also passes the **kernel command line** — parameters like `root=`, `quiet`, and `ro` that the kernel reads at startup.
+
+```bash title="inspect-cmdline.sh" showLineNumbers
+# What command line did this boot actually use?
+cat /proc/cmdline
+# e.g. BOOT_IMAGE=/vmlinuz root=UUID=... ro quiet splash
+```
+
+## 3. Kernel and initramfs
+
+The kernel decompresses itself, initializes hardware, and mounts the **initramfs** — a compressed CPIO archive holding a minimal root filesystem in RAM. Why bother? The kernel often can't reach the real root device yet: it may need to load storage drivers, assemble RAID/LVM, or unlock LUKS encryption. The initramfs contains exactly those tools.
+
+Once it has prepared the real root device, the initramfs calls `switch_root` to pivot onto the actual filesystem and execute `/sbin/init`.
+
+## 4. PID 1: systemd takes over
+
+On nearly all distributions `/sbin/init` is **systemd**, which becomes PID 1. systemd reads units and activates them according to dependencies, ultimately reaching a **target** — usually `graphical.target` or `multi-user.target`. Targets are synchronization points: `multi-user.target` means a fully usable multi-user, networked, non-GUI system.
+
+```bash title="targets.sh" showLineNumbers
+systemctl get-default            # the target booted by default
+systemctl list-dependencies graphical.target
+```
+
+## Measuring the boot
+
+systemd ships excellent profiling tools. Start with the high-level breakdown:
+
+```bash title="analyze.sh" showLineNumbers {2,5}
+# Total time split across firmware, loader, kernel, userspace
+systemd-analyze
+
+# Which units took longest to initialize
+systemd-analyze blame
+```
+
+`systemd-analyze blame` typically prints something like:
+
+```text title="blame-output.txt"
+8.123s NetworkManager-wait-online.service
+2.450s plymouth-quit-wait.service
+1.002s dev-sda2.device
+ 845ms snapd.service
+```
+
+For a visual map of what ran when, `systemd-analyze plot > boot.svg` produces a timeline you can open in a browser.
+
+> Tip: `NetworkManager-wait-online.service` is the most common offender in `blame` output. It is often safe to disable on systems that don't need the network ready before login.
+
+## Why the sequence matters
+
+Each stage can fail in characteristic ways: a corrupt ESP fails at firmware, a bad `root=` fails after the kernel, and a missing storage driver drops you to an initramfs emergency shell. Knowing *which* stage owns *which* responsibility lets you read the failure and go straight to the fix instead of guessing.

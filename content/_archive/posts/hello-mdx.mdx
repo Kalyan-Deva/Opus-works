@@ -1,0 +1,40 @@
+---
+title: "Hello, MDX"
+date: "2026-06-10"
+excerpt: "Why MDX is a great fit for a developer blog, and how this site renders it on the server."
+category: "Engineering"
+tags: ["MDX", "Next.js", "React"]
+author: "The Author"
+---
+
+MDX lets you write **Markdown** and drop in **React components** wherever you
+need them. That makes it a perfect format for a technical blog: prose stays
+readable, but you can reach for interactivity the moment a static page isn't
+enough.
+
+## Frontmatter drives everything
+
+Each post starts with a small block of YAML frontmatter. The content layer
+parses it with `gray-matter`, so the title, tags, and category you see in the
+UI all come straight from the top of this file.
+
+## Code blocks just work
+
+Fenced code blocks are highlighted on the server with Shiki via
+`rehype-pretty-code`, so there's zero client-side highlighting cost:
+
+```ts title="greet.ts" showLineNumbers {3}
+export function greet(name: string): string {
+  // this line is highlighted
+  return `Hello, ${name}!`;
+}
+
+greet("MDX");
+```
+
+Inline code like `const x = 42` is styled too.
+
+> Tip: add `title="..."`, `showLineNumbers`, or a `{1,3-5}` line range to any
+> fenced block.
+
+Happy writing!

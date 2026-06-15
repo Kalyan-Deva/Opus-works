@@ -1,0 +1,175 @@
+---
+title: "Modeling a City's Power Grid as a Graph"
+date: "2026-03-20"
+excerpt: "Treating the Boston metro electric grid as a network of nodes and edges reveals which substations matter most — and how the system fails under targeted attack versus random faults."
+category: "Critical Infrastructure"
+tags: ["Critical Infrastructure", "Graph Theory", "Risk Analysis", "Research"]
+author: "Kalyan Gopalam"
+---
+
+When the lights go out, most people picture a downed line and a repair truck. I used to picture the same thing. Then I spent a semester treating the Boston metropolitan electric power distribution network as a mathematical object — a set of nodes and edges, an adjacency matrix, a handful of eigenvalues — and the picture changed. A blackout is rarely about one downed line. It is about *which* line, *which* substation, and how the rest of the network redistributes the load when that piece disappears. The grid is a graph, and graphs have structure that tells you, before any wire ever fails, where the system is brittle and where it is forgiving.
+
+This post is a walk through the project I built for Prof. Themis A. Papageorge's critical-infrastructure course, submitted in April 2026. I modeled the Boston metro distribution network as an eight-node graph, computed a set of centrality measures and the spectral radius to quantify structural vulnerability, ranked the critical nodes with a betweenness-driven risk method, performed a fault tree analysis on the busiest substation, and framed the whole thing inside the DHS Energy Sector cybersecurity guidance. The model is deliberately small and deliberately illustrative — eight nodes is not the real Boston grid, and I will be candid about that at the end. But the small model is enough to make the core ideas concrete, and the core ideas scale.
+
+## Why model infrastructure as a graph at all
+
+Start with the question of *why* a graph is the right abstraction. A power distribution network is, physically, a collection of generation sources, transmission lines, substations that step voltage up and down, distribution feeders, and the loads they serve. That is a lot of heterogeneous equipment. But if you squint, the thing that matters for resilience is the *topology* — what is connected to what. Power flows along edges. If an edge or a node is removed, power has to find another path or it does not arrive. That is a connectivity question, and connectivity questions are exactly what graph theory was built to answer.
+
+So I represented the network as a graph `G = (V, E)`, where `V` is the set of substations (the nodes) and `E` is the set of transmission or distribution links between them (the edges). For an undirected model — which is a reasonable first cut for a distribution network where power can flow either direction along a feeder depending on load and switching state — the whole topology collapses into an *adjacency matrix* `A`. This is an `n x n` matrix where `A[i][j]` is `1` if substations `i` and `j` are directly connected and `0` otherwise. For eight nodes, that is an eight-by-eight matrix of ones and zeros, symmetric across the diagonal because if `i` connects to `j` then `j` connects to `i`.
+
+That matrix is the entire model. Everything I computed afterward — every centrality score, the spectral radius, the failure simulations — is a function of `A`. This is the quietly powerful thing about the graph abstraction: once you have written down who is connected to whom, an enormous amount of structural information is already determined, and you can extract it with linear algebra rather than with a physics simulator. You are not modeling voltage and phase angle and reactive power. You are modeling reachability and centrality, and for a first-pass vulnerability assessment that is often the question you actually care about: *if this piece is gone, does the network hold together, and which piece hurts the most to lose?*
+
+There is a second reason graphs are the right tool, and it is the reason this lives in a security curriculum rather than an electrical-engineering one. An adversary who wants to cause maximum disruption with minimum effort is, whether they know the vocabulary or not, solving a graph problem. They are looking for the node whose removal does the most damage. If I can compute that node, I can both predict where an attacker will aim and tell a defender where to spend their hardening budget. The graph is a shared language between the attacker's optimization problem and the defender's prioritization problem.
+
+## The centrality measures, and what each one tells you about a grid
+
+"Which node matters most" is not a single question. It has several answers depending on what you mean by *matters*, and the centrality measures are precisely the different formalizations of that word. I computed three: degree, betweenness, and eigenvector centrality. They agree often enough to be reassuring and disagree often enough to be interesting.
+
+### Degree centrality: how many neighbors
+
+Degree centrality is the simplest. The degree of a node is just the number of edges attached to it — how many other substations it connects to directly. Degree centrality normalizes that by the maximum possible degree (`n - 1`), so it lands between `0` and `1`. A substation with high degree is a hub: lots of lines come into it and leave it.
+
+What does high degree tell you about a grid? It tells you about *local* importance and immediate blast radius. If a high-degree substation fails, every one of its neighbors loses a direct path through it simultaneously. It is a measure of how many other things are directly leaning on this node. But degree is myopic. It counts your neighbors without asking anything about *their* importance or about the role you play in the wider flow. A node can have only two connections and still be catastrophic to lose, if those two connections are the only bridge between two halves of the network. Degree will not see that. For that, you need betweenness.
+
+### Betweenness centrality: how much flow passes through you
+
+Betweenness centrality asks a different question: of all the shortest paths between all pairs of nodes in the network, what fraction pass *through* this node? Formally, for a node `v`, you sum over every pair of other nodes `s` and `t` the fraction of shortest `s`-to-`t` paths that include `v`. A node with high betweenness is a bridge, a chokepoint, a piece of connective tissue. Traffic — or in the power case, the natural routing of flow along efficient paths — funnels through it.
+
+This is the measure that most directly captures what infrastructure people call a *single point of failure*. A node can have modest degree and enormous betweenness if it is the unique link between two otherwise-separate regions of the grid. Knock it out and you do not merely inconvenience its immediate neighbors; you *partition* the network, splitting it into components that can no longer reach each other. In my Boston model, the nodes that lit up under betweenness were exactly the ones you would worry about from an attacker's point of view: lose them and the graph fragments. Betweenness is, in my opinion, the single most security-relevant centrality for a grid, because an intelligent adversary is hunting for cuts, and betweenness is a direct measure of how cut-vulnerable the network is at each node.
+
+### Eigenvector centrality: importance by association
+
+Eigenvector centrality is the subtlest of the three and the one students tend to find slippery, so it is worth slowing down. Degree counts your neighbors equally. Eigenvector centrality says: a connection to an important node should count for more than a connection to an unimportant one. Your score is proportional to the sum of your neighbors' scores. That sounds circular — your importance depends on theirs, which depends on yours — and it is, but it is the *good* kind of circular that linear algebra resolves cleanly.
+
+The resolution is that the eigenvector-centrality scores are exactly the entries of the principal eigenvector of the adjacency matrix `A` — the eigenvector associated with the largest eigenvalue. You solve `A x = lambda x` for the dominant `lambda`, and the corresponding `x` gives every node a score that self-consistently reflects the importance of its neighborhood. (This is, not coincidentally, the same mathematical machinery behind Google's original PageRank, which ranks web pages by the importance of the pages that link to them.)
+
+For a grid, eigenvector centrality identifies nodes embedded in *dense, important regions* of the network. A substation might have only moderate degree, but if it sits among the most connected substations in the metro core, its eigenvector score will be high. It captures something the other two miss: being well-connected *to the well-connected*. Where betweenness finds bridges, eigenvector centrality finds the dense heart. In a city grid, the downtown core — many substations, many interconnections, serving the densest load — tends to dominate the eigenvector ranking even when no single one of those nodes is a unique bridge.
+
+### Reading the three together
+
+The practical move is not to pick one measure but to read all three and pay special attention to where they *disagree*. A node that scores high on all three is unambiguously critical and an obvious hardening priority. A node that scores high only on betweenness is a hidden bridge — easy to overlook because it is not a hub, dangerous because its loss fragments the network. A node high only on eigenvector centrality is a member of the critical core whose individual loss may be survivable because of local redundancy. The disagreements are where the analysis earns its keep, because they surface vulnerabilities that any single intuitive heuristic — "protect the biggest substations" — would miss.
+
+## Spectral radius as a measure of robustness
+
+Beyond the per-node centralities, I wanted a single number that characterized the *whole* network's robustness. That number is the spectral radius: the largest eigenvalue (by magnitude) of the adjacency matrix `A`, conventionally written `lambda_max`.
+
+Why should the biggest eigenvalue of a connectivity matrix say anything about robustness? The intuition runs through the idea of paths and propagation. Powers of the adjacency matrix count walks: the entry `(A^k)[i][j]` counts the number of walks of length `k` from `i` to `j`. The spectral radius governs how fast the number of walks grows as you raise `A` to higher powers — it is the dominant growth rate of connectivity in the network. A larger `lambda_max` means more redundant pathways, more ways for flow to get from one place to another, more alternate routes when a primary route fails. Denser, more interconnected graphs have larger spectral radii.
+
+This gives spectral radius a dual reading that is genuinely useful for infrastructure. On the resilience side, a higher spectral radius signals more path redundancy and therefore a network that tolerates the loss of individual edges more gracefully. On the contagion side — and this is the reading from epidemic theory — the spectral radius sets the threshold for how easily something *spreads* across the network. In epidemic models on graphs, the critical condition for an infection to take hold scales with `1 / lambda_max`: the larger the spectral radius, the lower the threshold, the more readily a cascade propagates. For a power grid, that contagion reading maps onto *cascading failure*: an overload that trips one substation, redistributes load to neighbors, trips them, and rolls outward.
+
+So the spectral radius is double-edged, and naming that tension was one of the more satisfying parts of the project. The very density that makes a grid robust against the *random* loss of one component is the same density that lets a *cascade* travel. You cannot simply maximize `lambda_max` and call the network safe. You want enough redundancy to survive single failures without building a structure so tightly coupled that a local trip becomes a metro-wide blackout. Robustness against isolated faults and resistance to cascades pull in opposite directions, and the spectral radius is where that tradeoff becomes a number you can look at.
+
+## MBRA: ranking the critical nodes
+
+Centralities give you several rankings; the spectral radius gives you one global number. What a decision-maker actually wants is a single prioritized list: *here are the substations, worst-first, in order of how much you should care about protecting them.* For that I applied a Multi-Criteria Betweenness-based Risk Assessment, MBRA.
+
+The "betweenness-based" part reflects the judgment I argued for earlier — that for a flow network under intelligent attack, betweenness is the centrality most predictive of disruptive impact, because it measures how badly the network fragments when a node is removed. MBRA uses betweenness as the structural backbone of the ranking. The "multi-criteria" part is what keeps it honest: pure betweenness is a topology-only measure, and a real risk ranking has to fold in factors that topology cannot see. In the framework, each node's risk is a combination of its structural criticality (the betweenness-driven term, capturing how much disruption its loss causes) and additional criteria such as how vulnerable the node is to a given threat and the consequence or load served if it goes down.
+
+Conceptually, MBRA is doing the classic risk decomposition — risk as a function of consequence and likelihood — but with the consequence term grounded in network science rather than guessed at. The betweenness score *is* a principled, quantitative consequence estimate: it says, concretely, how much shortest-path connectivity the network loses if this node is removed. That is far more defensible than an analyst eyeballing a one-to-five "impact" rating. Layering the threat-likelihood and load-served criteria on top produces a ranking that respects both the math of the topology and the operational reality that not every structurally important node is equally exposed or equally consequential to the customers downstream.
+
+The output is an ordered list of critical nodes. For a defender with a finite budget, that list is the entire point: it tells you that hardening the top one or two substations buys you far more resilience than spreading the same money evenly across all eight. Risk reduction in networks is enormously non-uniform, and MBRA makes the non-uniformity explicit.
+
+## Targeted attack versus random failure: robust yet fragile
+
+Here is the result that I think is the most important thing graph theory has to say to infrastructure security, and it is counterintuitive enough that it is worth stating plainly. The same network can be extraordinarily resilient to *random* failure and extraordinarily fragile to *targeted* attack. The two failure modes are not points on one scale. They are different questions, and a network can ace one while flunking the other.
+
+The reason is the degree distribution. Many real infrastructure networks are *scale-free* or scale-free-ish: rather than every node having roughly the same number of connections, a few hub nodes carry many connections while most nodes carry few. (Whether real power grids are strictly scale-free is debated in the literature — they are often closer to exponential — but the qualitative robust-yet-fragile behavior shows up across a wide range of heavy-tailed and hub-and-spoke topologies, and an eight-node city core with a dominant downtown cluster behaves this way.) When the degree distribution is uneven like this, the two failure scenarios diverge sharply.
+
+Under *random failure* — a storm takes out an arbitrary substation, equipment ages and fails on its own schedule, a fault hits wherever physics decides — the most likely victim is a low-degree node, simply because there are many more low-degree nodes than hubs. Knocking out a peripheral, lightly-connected substation barely dents the global structure; the network routes around it and the giant connected component survives almost intact. You can remove a surprising fraction of randomly chosen nodes before connectivity collapses. That is the *robust* half.
+
+Under *targeted attack* — an adversary who has studied the topology and aims for the nodes my centrality analysis flagged — the calculus inverts. The attacker goes straight for the high-betweenness bridges and the high-degree hubs. Removing just one or two of those can fragment the network, partition the grid into islands, and cause connectivity to fall off a cliff. The very hubs that make the network efficient and route-redundant under normal operation are the concentrated weak points an intelligent adversary exploits. That is the *fragile* half. This is the "robust yet fragile" signature, and it falls directly out of the structure: concentrate connectivity in a few nodes and you simultaneously gain redundancy against random loss and create high-value targets for deliberate attack.
+
+In my model I exercised both scenarios against the eight-node graph — removing nodes at random versus removing them in centrality-ranked order — and the qualitative split was exactly this. Random removals degraded connectivity gently and gradually. Targeted removal of the top-ranked nodes degraded it sharply and early. For a security analyst the lesson writes itself: a resilience plan tuned only for random faults and natural disasters — which is, historically, how a lot of grid reliability engineering was framed — can be completely blind to the targeted-attack failure mode, and the targeted mode is precisely the one a hostile actor will choose. You have to defend against the failure scenario your adversary gets to *pick*, not the one nature hands you on average.
+
+## Fault tree analysis of the Downtown Distribution Substation
+
+The graph analysis operates at the level of the whole network. To complement it, I zoomed all the way in on a single node — the Downtown Distribution Substation, which the centrality and MBRA analysis flagged as a top critical node — and performed a fault tree analysis on it.
+
+Fault tree analysis is a deductive, top-down reliability technique. You begin with a single undesired *top event* — here, "loss of the Downtown Distribution Substation" — and you work backward through the chain of causes that could produce it. The tree is built from logic gates. An `AND` gate under an event means every input has to occur for that event to happen, which models redundancy: if two independent things both have to fail, the combined event is rare. An `OR` gate means any single input suffices, which models a lack of redundancy and a single point of failure. You decompose the top event down through intermediate events to *basic events* — the root causes that you can actually assign a probability to: a transformer failure, a protective relay misoperation, a loss of the incoming feed, a cooling-system failure, and — the reason this matters for a security course — a cyber compromise of the substation's control system.
+
+That last branch is what makes the fault tree a *cyber-physical* analysis rather than a purely electrical one. A modern substation is not just transformers and breakers; it is also remote terminal units, programmable logic, and a SCADA link back to a control center. A successful intrusion into that control path is a basic event that feeds the same top event — loss of the substation — as a blown transformer does. Modeling the cyber-attack path as a first-class basic event in the same tree as the physical failures is exactly the integration the analysis is meant to force. The substation can be lost by a lightning strike or by a logic bomb, and a serious risk model has to hold both in view at once.
+
+The structure of the tree is itself informative before you ever plug in probabilities. Wherever the tree shows an `OR` gate directly above the top event, you are looking at a single point of failure — any one of those inputs alone takes the substation down. Wherever you find an `AND` gate, you have engineered-in redundancy that you want to preserve. Reading the gate structure tells you where to invest: convert critical `OR`s into `AND`s by adding redundancy, and protect the existing `AND`s from common-cause failures that would defeat them (a cyber attack that simultaneously disables both "redundant" relays via the shared control system is a textbook common-cause failure, and it is one the energy sector worries about specifically). The fault tree, in other words, gives the per-node depth that the graph-level centrality measures cannot, and crucially it is the place where the physical and cyber failure modes get analyzed in one coherent picture.
+
+## Tying it to the DHS Energy Sector framework and cyber-physical risk
+
+None of this analysis exists in a vacuum. The energy sector is one of the critical infrastructure sectors that the U.S. Department of Homeland Security and CISA treat as foundational — its disruption cascades into water, communications, healthcare, finance, and essentially everything else, which is why it is sometimes described as a uniquely "enabling" sector. I framed my findings inside that policy context deliberately, because a vulnerability analysis that does not connect to how the sector is actually governed and defended is just an academic exercise.
+
+The connection runs through the NIST Cybersecurity Framework functions — Identify, Protect, Detect, Respond, Recover — which the energy sector has adopted as its organizing structure for cyber risk. My graph analysis is, almost exactly, a rigorous instantiation of the *Identify* function. "Identify" asks an organization to understand its assets, their criticality, and the risks to them. Centrality scores, the spectral radius, MBRA rankings, and the substation fault tree are precisely a quantitative asset-criticality and risk inventory. They turn "which substations matter" from a matter of institutional folklore into a computed, defensible ranking. And by carrying the cyber-attack path into the fault tree, the work explicitly bridges into the cyber-physical reality the framework demands: in a modern grid, "Protect" and "Detect" have to cover the SCADA and ICS layer, not just the physical perimeter, because the graph does not care whether a critical node was lost to a substation fire or to a compromised remote terminal unit. The topological consequence is identical.
+
+The targeted-versus-random result feeds directly into this framing as well. It argues that energy-sector risk identification cannot stop at reliability engineering against natural faults; it has to model the *adversary's* objective function, which is to find and remove the high-centrality nodes. That is a cyber-physical threat model, and it is the one the DHS guidance increasingly emphasizes as the line between IT and operational-technology attacks blurs.
+
+## The limits of an eight-node model
+
+I want to close by being honest about what this model is not, because a small model wearing the costume of rigor can mislead, and naming the limits is part of doing the analysis well.
+
+Eight nodes is a drastic abstraction of a metropolitan grid that in reality comprises hundreds of substations and thousands of distribution segments. Aggregating that down to eight nodes means each node stands in for a whole cluster of real equipment, and the specific centrality *numbers* are artifacts of where I drew those aggregation boundaries. The rankings are illustrative of the method, not an operational map of Boston's actual vulnerabilities — I would not hand this to a utility and tell them which substation to fence first. A coarse model can also hide redundancy that exists at finer granularity: two of my edges might represent path diversity that, at full resolution, turns out to share a single physical right-of-way and therefore a single point of failure the eight-node view cannot see.
+
+The topological abstraction itself has limits beyond resolution. My model is purely structural — it treats edges as binary connections and ignores the physics that actually governs whether a grid stays up: line capacities, power flow constraints, reactive power, voltage stability, and the protective-relay logic that decides in milliseconds what trips when. Real cascading failures are driven by *overloads* — load redistributing onto lines that then exceed their thermal limits — and a binary adjacency matrix has no notion of a limit to exceed. A high-betweenness node in my graph is a strong *hypothesis* about a critical node, but confirming it requires a power-flow model that the graph deliberately leaves out. I also modeled the network as undirected and static, when real distribution networks are reconfigurable: operators open and close switches, so the topology that exists during a fault is not the topology on the one-line diagram.
+
+None of this invalidates the exercise. The value of the eight-node model is pedagogical and methodological: it makes every concept — adjacency matrix, the three centralities, spectral radius, MBRA, the targeted-versus-random divergence, the cyber-physical fault tree — concrete enough to compute by hand and inspect end to end, and the *methods* are exactly the ones that scale to a real grid with real data. The graph is small; the way of seeing is not. That, more than any particular number, is what I took away from the project: a blackout is a property of structure, and structure is something you can measure before anything fails.
+
+## The analysis in code
+
+The entire structural analysis is a few lines of NetworkX on top of an adjacency matrix. Here is a compact version that builds a small grid, computes the three centralities, and reports the spectral radius — the same pipeline I ran against the eight-node model.
+
+```python title="grid_analysis.py" showLineNumbers {1}
+import networkx as nx
+import numpy as np
+
+# Adjacency matrix for an illustrative 8-node metro grid.
+# Node 0 stands in for the dense Downtown Distribution Substation.
+A = np.array([
+    [0, 1, 1, 1, 1, 0, 0, 0],
+    [1, 0, 1, 0, 0, 1, 0, 0],
+    [1, 1, 0, 1, 0, 0, 0, 0],
+    [1, 0, 1, 0, 0, 0, 1, 0],
+    [1, 0, 0, 0, 0, 1, 0, 1],
+    [0, 1, 0, 0, 1, 0, 1, 0],
+    [0, 0, 0, 1, 0, 1, 0, 1],
+    [0, 0, 0, 0, 1, 0, 1, 0],
+])
+
+labels = {
+    0: "Downtown", 1: "Back Bay", 2: "Seaport", 3: "Cambridge",
+    4: "Charlestown", 5: "Somerville", 6: "Dorchester", 7: "Brookline",
+}
+
+G = nx.from_numpy_array(A)
+G = nx.relabel_nodes(G, labels)
+
+degree = nx.degree_centrality(G)
+betweenness = nx.betweenness_centrality(G)
+eigenvector = nx.eigenvector_centrality(G, max_iter=1000)
+
+print(f"{'Substation':<12}{'Degree':>9}{'Between':>9}{'Eigen':>9}")
+for node in G.nodes():
+    print(f"{node:<12}{degree[node]:>9.3f}"
+          f"{betweenness[node]:>9.3f}{eigenvector[node]:>9.3f}")
+
+# Spectral radius: the largest-magnitude eigenvalue of A.
+# A proxy for path redundancy -- and for how readily a cascade spreads.
+eigenvalues = np.linalg.eigvals(A)
+spectral_radius = max(abs(eigenvalues))
+print(f"\nSpectral radius (lambda_max): {spectral_radius:.3f}")
+
+# Targeted vs. random failure: remove the top-betweenness node and
+# measure how the size of the largest connected component drops.
+target = max(betweenness, key=betweenness.get)
+G_attacked = G.copy()
+G_attacked.remove_node(target)
+largest = max(nx.connected_components(G_attacked), key=len)
+print(f"Removed highest-betweenness node: {target}")
+print(f"Largest component now spans {len(largest)} of {G.number_of_nodes() - 1} remaining nodes")
+```
+
+The pattern is the point: the topology goes in as a matrix, and a handful of well-understood functions turn it into a prioritized picture of where the network is brittle. Swap in a real adjacency matrix and the same code runs unchanged.
+
+## References
+
+- NetworkX documentation — centrality algorithms: [https://networkx.org/documentation/stable/reference/algorithms/centrality.html](https://networkx.org/documentation/stable/reference/algorithms/centrality.html)
+- NetworkX documentation — main reference: [https://networkx.org/documentation/stable/reference/index.html](https://networkx.org/documentation/stable/reference/index.html)
+- NIST Cybersecurity Framework (CSF) 2.0: [https://www.nist.gov/cyberframework](https://www.nist.gov/cyberframework)
+- CISA — Energy Sector: [https://www.cisa.gov/topics/critical-infrastructure-security-and-resilience/critical-infrastructure-sectors/energy-sector](https://www.cisa.gov/topics/critical-infrastructure-security-and-resilience/critical-infrastructure-sectors/energy-sector)
+- Albert, Jeong, and Barabasi (2000), "Error and attack tolerance of complex networks," *Nature* 406, 378-382: [https://www.nature.com/articles/35019019](https://www.nature.com/articles/35019019)
+- Freeman (1977), "A Set of Measures of Centrality Based on Betweenness," *Sociometry* 40(1), 35-41: [https://www.jstor.org/stable/3033543](https://www.jstor.org/stable/3033543)

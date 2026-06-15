@@ -1,0 +1,41 @@
+---
+title: "Ledger CLI"
+year: "2024"
+role: "Engineering"
+summary: "A fast, plain-text personal finance tracker with double-entry accounting in the terminal."
+stack: ["Rust", "SQLite"]
+tags: ["CLI", "Tooling"]
+repoUrl: "https://github.com/example/ledger-cli"
+featured: false
+order: 3
+---
+
+Ledger CLI is a personal finance tracker that keeps your books in plain text and your reports a single command away, with real double-entry accounting underneath.
+
+## Problem
+
+Personal finance apps tend to lock data in proprietary stores, demand a subscription, and ask you to trust a cloud with your transactions. The plain-text accounting community solved the data ownership problem years ago, but the tooling often felt slow on large files and awkward to query.
+
+I wanted a tool that kept the plain-text source of truth, enforced double-entry rules so the books always balanced, and returned reports over years of history fast enough to feel instant.
+
+## Approach
+
+The source of truth is a human-readable journal file. Each transaction lists postings that must sum to zero, which is the core invariant of double-entry accounting and the thing the parser enforces before anything is recorded.
+
+For speed, Ledger CLI parses the journal once and materializes it into an in-memory SQLite database. Reports are then ordinary SQL queries, which keeps the reporting code small and lets the database engine handle aggregation efficiently.
+
+```rust title="src/posting.rs" showLineNumbers
+fn validate(postings: &[Posting]) -> Result<(), Error> {
+    let total: i64 = postings.iter().map(|p| p.amount_cents).sum();
+    if total != 0 {
+        return Err(Error::Unbalanced(total));
+    }
+    Ok(())
+}
+```
+
+Amounts are stored as integer cents rather than floats, which sidesteps the rounding errors that quietly corrupt financial math. The CLI itself is built around a few focused subcommands: record a transaction, show a balance, and run a register report over a date range.
+
+## Outcome
+
+Parsing and reporting over a multi-year journal with tens of thousands of transactions completes in well under a second, fast enough that there is no perceptible wait. The balance invariant has caught several fat-fingered entries at record time, before they ever polluted a report. Because the journal is just text in a Git repository, the full history is versioned, diffable, and owned entirely by the user. It has quietly replaced the spreadsheet I used to dread updating.

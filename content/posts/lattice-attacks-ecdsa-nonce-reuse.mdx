@@ -1,0 +1,224 @@
+---
+title: "Lattice Attacks on ECDSA Nonce Reuse"
+date: "2026-01-30"
+excerpt: "Reuse or leak a few bits of an ECDSA nonce and the private key falls out — via simple algebra when the nonce repeats, and lattice reduction when only fragments leak."
+category: "Cryptography"
+tags: ["Cryptography", "ECDSA", "Lattices", "CTF"]
+author: "Kalyan Gopalam"
+---
+
+Of all the ways to break a signature scheme, my favorite is the one where you do not break the scheme at all. ECDSA, as a piece of mathematics, is fine. The discrete-logarithm problem on a well-chosen elliptic curve is as hard as we want it to be, and nobody recovers a private key by attacking the curve directly. What people do — over and over, in shipped firmware, in cryptocurrency wallets, and in roughly half the crypto challenges I have worked through at events like MetaCTF — is mishandle one ephemeral value. The per-signature nonce. Get that wrong, even slightly, and the private key falls out of the algebra like a coin out of a torn pocket.
+
+This article is about that failure, end to end. I want to start from the signing equation so the role of the nonce is unambiguous, then walk through the catastrophic case where a nonce is reused outright — which you can solve with grade-school modular algebra — and then the subtler and frankly more beautiful case where only a few bits of each nonce leak. That second case is the Hidden Number Problem, and it turns into a lattice problem you hand to LLL or BKZ. I will show the derivations, sketch the code I actually reach for, and then talk about why this keeps happening in the real world and how the deterministic-nonce designs finally put a stop to it.
+
+I am going to be careful with the math, because the whole point is that the math is not the weak part. If you have ever stared at a CTF prompt that hands you a pile of signatures and a vague hint about a "weak random number generator," this is the toolkit.
+
+## The signing equation, and where the nonce lives
+
+Fix an elliptic curve with a base point `G` of prime order `n`. The private key is a scalar `d` with `1 <= d < n`, and the public key is the point `Q = d * G`. Signing a message works on the hash of the message, reduced into the scalar field; call that integer `z` (in practice `z` is the leftmost bits of the message hash, but for our purposes it is just a known integer mod `n`).
+
+To sign, you generate a per-signature nonce `k`, an integer with `1 <= k < n`, and compute:
+
+```python title="ecdsa_sign.py" showLineNumbers {1}
+# All arithmetic on scalars is mod n (the group order).
+# (x1, y1) is a point on the curve; r and s are the signature.
+
+def sign(z, d, k, G, n):
+    x1, y1 = scalar_mul(k, G)      # k * G
+    r = x1 % n                     # r = x-coordinate of kG, mod n
+    s = (pow(k, -1, n) * (z + r * d)) % n
+    return (r, s)
+```
+
+The two pieces you publish are `r`, the x-coordinate of the point `k * G` reduced mod `n`, and `s`, defined by:
+
+`s = k^(-1) * (z + r*d) mod n`
+
+That single equation is the entire game. Look at what is in it. `z` is public — anyone can hash the message. `r` is public — it is half the signature. `s` is public — it is the other half. The curve and `n` are public. There are exactly two secrets: the long-term private key `d`, and the ephemeral nonce `k`. One equation, two unknowns. That is underdetermined, which is exactly why a single signature reveals nothing.
+
+The security of the whole construction rests on a deal the signer makes with themselves: `k` must be uniformly random, secret, and — this is the part people forget — never reused across signatures. The "ephemeral" in ephemeral nonce is load-bearing. The instant that promise is broken, the equation stops being underdetermined, and `d` is recoverable.
+
+Rearranging the signing equation to isolate the key makes the dependency explicit. Multiply through by `k`:
+
+`s*k = z + r*d mod n`
+
+so
+
+`d = r^(-1) * (s*k - z) mod n`
+
+Read that last line slowly. If you ever learn `k` for even a single signature, you compute `d` immediately, because everything else on the right-hand side is public. The nonce is not just "a random number for this signature." The nonce is a second copy of the secret. Leaking `k` is identical to leaking `d`. Hold that thought, because every attack that follows is just a different way of learning `k`.
+
+## The catastrophic case: full nonce reuse
+
+Now suppose a signer produces two signatures with the *same* nonce `k`. Maybe their RNG was broken and returned a constant. Maybe an embedded device had no entropy source at boot. Maybe a developer hard-coded `k` during testing and shipped it. The cause does not matter; the consequence is total.
+
+Two messages, hashes `z1` and `z2`, signed with the same `k`. Because `r` is the x-coordinate of `k * G`, and `k` is identical for both, the two signatures share the same `r`. That shared `r` is the visible fingerprint of reuse — it is the first thing I scan for. The two signing equations are:
+
+`s1 = k^(-1) * (z1 + r*d) mod n`
+
+`s2 = k^(-1) * (z2 + r*d) mod n`
+
+Subtract them. The `r*d` term is identical in both, so it cancels along with everything else except the hashes:
+
+`s1 - s2 = k^(-1) * (z1 - z2) mod n`
+
+Solve for the nonce directly:
+
+`k = (z1 - z2) * (s1 - s2)^(-1) mod n`
+
+That is it. The private key never even appeared in that step — we recovered `k` from four public numbers and one modular inverse. And once `k` is known, the previous section's identity hands us the key:
+
+`d = r^(-1) * (s1*k - z1) mod n`
+
+No lattice, no approximation, no brute force. Two signatures and a couple of inversions mod `n`. Here is the whole recovery, written the way I would in a solve script:
+
+```python title="reuse_recover.py" showLineNumbers {1}
+from sympy import mod_inverse
+
+def recover_from_reuse(z1, s1, z2, s2, r, n):
+    """
+    Two ECDSA signatures (r, s1) and (r, s2) made with the SAME nonce k
+    over message hashes z1 and z2. Shared r is the tell.
+    Returns (k, d): the reused nonce and the private key, both mod n.
+    """
+    # s1 - s2 = k^-1 (z1 - z2)  =>  k = (z1 - z2) / (s1 - s2)
+    k = ((z1 - z2) * mod_inverse((s1 - s2) % n, n)) % n
+
+    # s = k^-1 (z + r d)  =>  d = r^-1 (s*k - z)
+    d = (mod_inverse(r, n) * (s1 * k - z1)) % n
+    return k, d
+```
+
+One subtlety worth flagging for the CTF crowd: if `s1 == s2 mod n` you cannot invert the difference — but that only happens when `z1 == z2`, i.e. the two messages are identical, in which case the signatures are literally the same and there was no second signature to begin with. In every genuine reuse case `s1 != s2`, and the inverse exists because `n` is prime so every nonzero residue is invertible.
+
+This is not a theoretical curiosity. The most famous instance is the 2010 break of the Sony PlayStation 3's code-signing. Sony's ECDSA implementation used a *fixed* nonce — the same `k` for every signature it ever produced — which is the reuse case taken to its limit. The group fail0verflow demonstrated at the 27th Chaos Communication Congress that with two signed binaries you could recover Sony's private signing key by exactly the subtraction above, after which anyone could sign code the console would accept as authentic. No curve was broken. A constant `k` was the entire vulnerability.
+
+The same pattern has drained real money. Bitcoin signs transactions with ECDSA over the secp256k1 curve, and every spend reveals a signature. Several wallet implementations over the years generated nonces with insufficient entropy and ended up reusing `k` across two transactions from the same address. Anyone watching the public blockchain could scan for two signatures sharing an `r`, run the subtraction, and recover the private key — and then sweep the funds. The leverage is brutal precisely because the signatures are public by design; the attacker does not need to compromise anything, only to read the ledger and do arithmetic.
+
+The lesson of the reuse case is stark: the nonce is not a parameter you can be sloppy with at the margins. A single repeat is fatal. But repeats are at least easy to avoid once you know to avoid them. The harder, more interesting question is what happens when the nonce is *not* repeated, but is merely a little bit predictable.
+
+## The subtle case: partial leakage and the Hidden Number Problem
+
+Suppose your nonces are all distinct, but biased. The classic scenario: a buggy RNG always produces nonces with a few high bits zeroed, so every `k` is "small" — say `k < 2^(t)` for some `t` well below the bit-length of `n`. Or a microcontroller's nonce generation leaks the low bits of `k` through a timing side channel, so for each signature you know, say, the bottom 8 bits. Individually, knowing a handful of bits of one nonce tells you almost nothing about the 256-bit key. But across many signatures, those fragments accumulate into a system you can solve.
+
+The framing that unlocks this is the **Hidden Number Problem (HNP)**, introduced by Boneh and Venkatesan in 1996 and connected to DSA-style nonce leakage by Howgrave-Graham and Smart shortly after. The HNP asks: given many approximate "most significant bits" of values `d * t_i mod n` for known multipliers `t_i`, recover the hidden number `d`. ECDSA with leaky nonces maps onto this almost directly.
+
+Start again from the signing equation and solve it for `k` instead of `s`:
+
+`k = s^(-1) * z + s^(-1) * r * d mod n`
+
+For each signature `i`, define the two publicly computable constants:
+
+`A_i = s_i^(-1) * r_i mod n`
+
+`B_i = s_i^(-1) * z_i mod n`
+
+Then every signature gives you a clean linear relation between its nonce and the key:
+
+`k_i = A_i * d + B_i mod n`
+
+Now bring in the leakage. Say you know that each nonce is small, `0 <= k_i < 2^(t)` with `2^(t)` much smaller than `n`. The equation says `A_i * d + B_i mod n` is a small number for the *true* `d`. For a wrong guess of `d`, that quantity behaves like a uniformly random residue mod `n` and is almost never small. So the secret `d` is characterized by the property that it simultaneously makes *all* of the expressions `A_i*d + B_i mod n` unusually small. That "many simultaneous smallness constraints mod `n`" structure is precisely what a lattice captures.
+
+(The same setup handles known *low* bits or known *high* bits — you just substitute the known part of `k_i` into the relation and treat the unknown part as the small value. Biased high bits are the easiest to picture, so I will keep using "small nonce" as the running example.)
+
+## Turning the HNP into a lattice
+
+Here is the move that I find genuinely elegant. We have, for each of `m` signatures:
+
+`A_i * d + B_i = k_i  (mod n)`
+
+with each `k_i` small and unknown, and `d` the single unknown shared across all of them. Introduce one integer `h_i` per equation to absorb the modular reduction, turning each congruence into an exact integer equation:
+
+`A_i * d + B_i - n * h_i = k_i`
+
+The right-hand sides `k_i` are all small. We want to find the integer combination of the knowns that lands on a short vector of these small `k_i`. Construct the lattice generated by the rows of this basis matrix (an `(m+1) x (m+1)` integer matrix):
+
+```python title="build_basis.py" showLineNumbers {1}
+# Build the HNP lattice basis for "small nonce" ECDSA recovery.
+# m signatures; each known k_i satisfies 0 <= k_i < 2^t, t << bitlen(n).
+# We use the Boneh-Venkatesan style embedding.
+
+def build_basis(A, B, n, t, m):
+    # Scaling factor: bound on the small nonces.
+    K = 1 << t
+
+    # Rows 0..m-1: n on the diagonal (the modular-reduction slack n*h_i).
+    # Row m holds the A_i coefficients plus a tag column for d.
+    # Last column carries the B_i constants plus a balancing term.
+    basis = [[0] * (m + 2) for _ in range(m + 1)]
+
+    for i in range(m):
+        basis[i][i] = n                 # n * h_i absorbs reduction mod n
+    for i in range(m):
+        basis[m][i] = A[i]              # A_i * d contribution
+    basis[m][m] = K // n if (K // n) else 1   # tag column scaling for d
+    for i in range(m):
+        basis[i][m + 1] = 0
+    basis[m][m + 1] = K                 # keeps the d-term balanced/short
+
+    # The target/constant vector formed from B_i is folded in by the
+    # caller as an extra row (CVP) or embedded as an SVP instance.
+    return basis, [(-b) % n for b in B], K
+```
+
+I have written that to show the *shape* rather than to drop in and win a CTF — the exact column scalings and whether you frame it as Shortest Vector (SVP) or Closest Vector (CVP) vary with the leakage model, and getting them right is most of the actual work. The conceptual content is what matters: each diagonal `n` lets the corresponding `h_i` slide freely so the modular reductions cost nothing in the lattice; the row of `A_i` lets you mix in `d` copies; and the `B_i` constants form the target you are trying to approximate. A lattice vector built from the *true* `d` and the *true* `h_i` has coordinates equal to the small `k_i` values — so it is a genuinely *short* vector, far shorter than the random vectors a wrong `d` produces.
+
+That is the whole trick: **the secret key corresponds to an unusually short (or close) vector in this lattice.** Finding short vectors is what lattice reduction does.
+
+Once the basis is built, you reduce it. The workhorse is **LLL** (Lenstra–Lenstra–Lovász, 1982), which runs in polynomial time and returns a basis of reasonably short, nearly-orthogonal vectors. For the easier instances — many signatures, generous leakage like 8 or more known bits per nonce — LLL alone surfaces a reduced vector whose entries are the `k_i`, and you read `d` straight out of the embedding. For the hard instances — very few leaked bits per signature, say 2 or 3 — LLL is not strong enough and you escalate to **BKZ** (Block Korkine–Zolotarev), which trades runtime for shorter vectors by doing exhaustive search inside blocks of a tunable size. In practice on a CTF box I start with LLL, and if the recovered `d * G` does not equal the known public key `Q`, I rerun with BKZ at increasing block sizes. The public key is the oracle: I always have `Q`, so I can verify a candidate `d` instantly and only keep one that checks out.
+
+```python title="solve_hnp.py" showLineNumbers {1}
+# Pseudocode for the solve loop. In real life I use fpylll or Sage's
+# built-in LLL/BKZ; the point here is the verify-against-Q structure.
+
+def solve_hnp(A, B, n, t, m, G, Q):
+    basis, target, K = build_basis(A, B, n, t, m)
+
+    for block in [0, 20, 30, 40]:          # 0 means "LLL only"
+        reduced = lll(basis) if block == 0 else bkz(basis, block_size=block)
+        for row in reduced:
+            d = extract_d_from_row(row, K, n)   # read d out of the embedding
+            if d is not None and scalar_mul(d, G) == Q:
+                return d                         # verified against the public key
+    return None
+```
+
+How many signatures do you need? The rough rule of thumb is that the total number of *leaked bits* across all signatures has to exceed the bit-length of `d`, with some overhead for the lattice geometry. If you know one bit of bias per signature, you need a few hundred signatures. If you know the top 8 bits, a few dozen will do. There is a beautiful and now-classic result — the "Minerva" and "TPM-FAIL" lines of work around 2019–2020 — showing that even a *single bit* of consistent nonce bias, harvested over enough signatures, is enough to recover keys from real hardware: smartcards, TPM chips, and crypto libraries that leaked timing. One bit. The HNP machinery is what turns that whisper of a bias into a full key.
+
+## Where the bias actually comes from
+
+It is tempting to file all of this under "use a better random number generator and move on," but the leakage in real systems is more varied and more insidious than a single broken RNG, and it is worth enumerating the sources because they shape the defense.
+
+The first and crudest source is genuinely bad randomness. Embedded devices generating keys at first boot with no entropy pool, virtual machines cloned from a snapshot so they share RNG state, or `/dev/urandom` misuse all produce nonces that are repeated or low-entropy. This is the fixed-`k` PS3 failure and the Bitcoin wallet repeats — the catastrophic, no-lattice-needed end of the spectrum.
+
+The second source is *structured* bias from the implementation itself. A common one is generating a nonce by sampling a random value and reducing it mod `n` incorrectly, or by sampling exactly the bit-length of `n` and discarding values that are too large in a way that skews the distribution. Curves whose order `n` is just below a power of two, like the NIST P-256 and P-521 curves, are particularly prone to subtle modular-reduction bias that zeroes or skews the top bits — a textbook HNP setup.
+
+The third, and the one I find most interesting, is side channels. Even with a perfect RNG, the *use* of the nonce can leak its bits. If the scalar multiplication `k * G` is not constant-time — if it branches or varies its memory-access pattern based on the bits of `k` — then a timing measurement, a cache-timing attack, or a power-analysis trace reveals partial information about each nonce. The Minerva and TPM-FAIL results were exactly this: the implementations leaked the bit-length or timing of the nonce, which translates into a few biased bits per signature, which feeds straight into the lattice. The attacker never sees the RNG at all; they see the *consequences* of how the secret nonce was consumed.
+
+The common thread is that the nonce is a secret that has to be both well-generated and well-handled, and any crack in either — a repeat, a skew, a timing leak — is enough.
+
+## Defenses: make the nonce not a liability
+
+The history of these attacks led the field to a clean conclusion: if random nonces are this dangerous, stop using random nonces. The fix that has essentially won is **deterministic nonce generation**, standardized in **RFC 6979**. Instead of sampling `k` from an RNG, you derive it deterministically from the private key and the message hash using an HMAC-based construction (HMAC_DRBG with the message and key as input). The same message and key always produce the same `k`, and crucially, *different* messages produce unpredictable, well-distributed nonces with no dependence on the quality of any RNG at signing time.
+
+This single change kills the entire reuse-and-bias family at the root. Two different messages can never collide on `k` because the message hash feeds the derivation. There is no RNG to be low-entropy, no boot-time entropy problem, no cloned-VM problem. The nonce is a deterministic function of inputs you already have, and it is uniformly distributed by the security of HMAC. A device with no entropy source at all can sign safely. RFC 6979 is the reason modern Bitcoin and TLS ECDSA implementations are not falling to nonce reuse the way 2010-era code did.
+
+**EdDSA** — the Edwards-curve signature scheme behind Ed25519 — bakes this in by design rather than as an add-on. EdDSA computes its per-signature nonce deterministically as a hash of the message together with a secret prefix derived from the private key. Determinism is not an optional mode you have to remember to enable; it is the only mode. EdDSA also uses complete addition formulas on a curve chosen so that constant-time implementation is the natural way to write it, which closes the side-channel door at the same time. If you are choosing a signature scheme today and have no legacy constraint, Ed25519 removes the entire class of nonce mistakes by construction, and that is a large part of why it has become the default.
+
+A few practical notes for anyone shipping this. First, deterministic nonces only help if you actually use a vetted implementation — rolling your own RFC 6979 and getting the HMAC_DRBG wrong reintroduces bias. Use the library's signing function, not a hand-built nonce. Second, determinism removes the RNG-quality problem but does *not* by itself remove side channels: a deterministic nonce that is consumed by a variable-time scalar multiplication still leaks bits through timing, so **constant-time implementations** of the point multiplication remain mandatory. There has even been work on fault attacks against deterministic signatures specifically, where an attacker glitches the computation to get two signatures over the same message with different nonces — so in the highest-assurance settings, hybrid schemes that mix in fresh randomness *and* determinism ("hedged" signatures) are recommended. Third, if you must use random nonces for some reason, the nonce must come from a CSPRNG, be the full width of `n`, and never be logged, cached, or reused — and you should still expect to lose to a determined side-channel attacker if your scalar multiplication is not constant-time.
+
+## What this all comes down to
+
+I keep coming back to the line from the start: the math is not the weak part. Every break in this article — the PS3, the Bitcoin sweeps, the smartcard key extractions — left the elliptic curve completely intact. What failed was the handling of one ephemeral integer. Reuse it and the key falls out with two subtractions. Leak a few of its bits per signature and the key falls out of a lattice. The whole defensive arc, from RFC 6979 to EdDSA's by-design determinism to constant-time scalar multiplication, is the field collectively deciding that an integer this dangerous should never be left to chance.
+
+For me the CTF angle and the production angle are the same lesson viewed from two sides. When I see a challenge hand me a list of signatures, my first instinct is to scan for a shared `r` (free win) and, failing that, to ask what is biased about the nonces and whether I can phrase it as an HNP and reduce a lattice. When I look at production code, the question is the mirror image: is there any path by which two nonces could collide, skew, or leak — and if so, why is this not using a deterministic scheme? The attacker's checklist and the defender's checklist are the same checklist. That symmetry is, I think, why these attacks are worth understanding deeply even though the fix is well known. The fix is only obvious *after* you have felt how little it takes to break the thing.
+
+## References
+
+- T. Pornin, [RFC 6979: Deterministic Usage of the Digital Signature Algorithm (DSA) and Elliptic Curve Digital Signature Algorithm (ECDSA)](https://datatracker.ietf.org/doc/html/rfc6979), IETF, 2013.
+- D. Boneh and R. Venkatesan, ["Hardness of Computing the Most Significant Bits of Secret Keys in Diffie-Hellman and Related Schemes"](https://link.springer.com/chapter/10.1007/3-540-68697-5_11), CRYPTO 1996 (the Hidden Number Problem).
+- A. K. Lenstra, H. W. Lenstra, L. Lovász, ["Factoring Polynomials with Rational Coefficients"](https://link.springer.com/article/10.1007/BF01457454), Mathematische Annalen, 1982 (the LLL algorithm).
+- D. J. Bernstein et al., [EdDSA / Ed25519: "High-speed high-security signatures"](https://ed25519.cr.yp.to/), and [RFC 8032: Edwards-Curve Digital Signature Algorithm (EdDSA)](https://datatracker.ietf.org/doc/html/rfc8032).
+- J. Jancar et al., ["Minerva: The curse of ECDSA nonces"](https://minerva.crocs.fi.muni.cz/), 2019 (single-bit nonce bias key recovery from real hardware).
+- D. Moghimi et al., ["TPM-FAIL: TPM meets Timing and Lattice Attacks"](https://tpm.fail/), USENIX Security 2020.
+- fail0verflow, ["Console Hacking 2010 — PS3 Epic Fail"](https://media.ccc.de/v/27c3-4087-en-console_hacking_2010), 27th Chaos Communication Congress (the fixed-nonce ECDSA break).

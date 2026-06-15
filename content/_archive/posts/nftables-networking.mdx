@@ -1,0 +1,79 @@
+---
+title: "Modern Linux Firewalling with nftables"
+date: "2026-02-19"
+excerpt: "Learn how nftables replaces iptables with a unified syntax — tables, chains, hooks, and sets — and build a complete stateful firewall ruleset."
+category: "Linux"
+tags: ["Linux", "Networking", "Security"]
+author: "The Author"
+---
+
+nftables is the modern packet-filtering framework in the Linux kernel, replacing the aging iptables/ip6tables/arptables/ebtables family with a single tool and a single syntax. If you administer firewalls in 2026, nftables is the foundation you should be building on.
+
+## The mental model: tables, chains, rules
+
+nftables organizes rules in a clear hierarchy:
+
+- A **table** is a namespace tied to an address family (`ip`, `ip6`, `inet`, `arp`, `bridge`, `netdev`). The `inet` family handles both IPv4 and IPv6 at once.
+- A **chain** lives in a table and attaches to a **hook** — a point in the kernel's packet path (`input`, `forward`, `output`, `prerouting`, `postrouting`).
+- A **rule** is a match-plus-action statement inside a chain.
+
+A *base chain* declares a hook and a priority; a *regular chain* is just a jump target you call from another chain, useful for organizing logic.
+
+## Sets make rules compact
+
+Rather than repeating a rule per port, nftables supports **sets** — `{ 22, 80, 443 }` inline, or named sets you can update at runtime without reloading. This keeps rulesets readable and fast, since sets are evaluated via hash lookups rather than linear scans.
+
+## A complete stateful firewall
+
+The ruleset below allows established traffic, SSH, HTTP/HTTPS, and ICMP, then drops everything else inbound. Save it and load with `nft -f`.
+
+```nftables title="/etc/nftables.conf" showLineNumbers {6,9,12,15}
+#!/usr/sbin/nft -f
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Accept already-established and related flows
+        ct state established,related accept
+        ct state invalid drop
+
+        # Loopback is always trusted
+        iif "lo" accept
+
+        # Allow specific services using a set
+        tcp dport { 22, 80, 443 } accept
+
+        # Basic ICMP for diagnostics and PMTU
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+```
+
+The key line is the `policy drop` on the input chain (line 6): the default is to reject anything not explicitly allowed. Line 9 is what makes the firewall *stateful* — `ct state` consults the kernel connection tracker so reply packets for connections you initiated are accepted without an explicit rule.
+
+Apply and inspect it:
+
+```bash title="apply.sh" showLineNumbers
+sudo nft -f /etc/nftables.conf
+sudo nft list ruleset          # show the live ruleset
+sudo systemctl enable nftables # load it at every boot
+```
+
+> Tip: Always test new rules over a console or out-of-band connection. If you lock yourself out over SSH, a scheduled `nft flush ruleset` via an `at` job can save the day.
+
+## How firewalld fits in
+
+Many distributions ship **firewalld** as a higher-level daemon with zones and a D-Bus API. On modern systems firewalld uses nftables as its backend — it generates nftables rules for you. The two work well together as long as you pick one as the source of truth. If you write rules directly into `/etc/nftables.conf`, disable firewalld to avoid two managers fighting over the same kernel tables.
+
+nftables rewards a few hours of learning with rulesets that are shorter, dual-stack by default, and far easier to reason about than the iptables chains they replace.

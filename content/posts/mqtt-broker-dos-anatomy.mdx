@@ -1,0 +1,317 @@
+---
+title: "Anatomy of an MQTT Broker DoS: From 600 MB to Outage"
+date: "2026-02-10"
+excerpt: "Three denial-of-service vectors that took a hardened Mosquitto broker from healthy to a 49-minute outage on a Raspberry Pi 4 — and the mitigations that stop them."
+category: "IoT Security"
+tags: ["IoT Security", "Denial of Service", "MQTT", "Networking"]
+author: "Kalyan Gopalam"
+---
+
+I have a habit of distrusting protocols that are described as "lightweight." The word usually means that someone made deliberate tradeoffs to fit a constrained device, and tradeoffs are exactly where attackers live. MQTT is the canonical lightweight protocol of the IoT world — it runs on doorbells, thermostats, industrial sensors, and fleets of microcontrollers that measure their RAM in kilobytes. So when I set out to understand how a real MQTT deployment fails under pressure, I did not want to read about it. I wanted to break one with my own hands and watch the numbers move.
+
+This post is the result. I stood up a fully configured Mosquitto broker on a Raspberry Pi 4, hardened it the way a reasonable engineer would for a small deployment — authentication, ACLs, rate limiting, a defined client topology — and then attacked it with three denial-of-service vectors I wrote myself in Python. The broker's memory footprint went from a calm baseline of around 600 MB to a full 8 GB. Network traffic climbed from under 1 Mbit/s to somewhere between 600 and 700 Mbit/s. And at the end of one run, the broker simply stopped: a complete outage that lasted roughly 49 minutes before the host clawed its way back.
+
+What follows is the anatomy of that failure. I will start with a short primer on the MQTT concepts that matter for this story, describe the test harness, then walk through each of the three attacks — how it works, why it hurts the broker specifically, what I measured, and the targeted mitigation that stops it. At the end I consolidate everything into a hardening runbook you can apply to your own deployment.
+
+## A quick primer on MQTT and brokers
+
+MQTT is a publish/subscribe protocol. Unlike a request/response model where a client asks a server for data, pub/sub decouples the producers of data from the consumers. A temperature sensor *publishes* a reading; a dashboard *subscribes* to receive it; neither knows the other exists. Sitting in the middle is the *broker*, the single piece of infrastructure that every message flows through. The broker is the post office, and like a post office, it is a wonderful single point of failure.
+
+A few concepts are load-bearing for the rest of this article.
+
+**Topics.** Every message is published to a *topic*, which is a hierarchical string separated by slashes, like `home/livingroom/temperature` or `factory/line3/motor/rpm`. Topics are not pre-registered anywhere. A client can publish to a topic that has never existed before, and the broker will happily route it. This is convenient. It is also, as we will see, a liability — the topic namespace is effectively unbounded and attacker-controlled.
+
+**Retained messages.** Normally a message is delivered to whoever is subscribed at the moment it is published, and then it is gone. But MQTT has a *retained* flag. When a publisher sets it, the broker stores that message as the "last known good" value for the topic and delivers it immediately to any client that subscribes later. This is genuinely useful: a new dashboard that connects should see the current thermostat setting without waiting for the next update. The catch is that the broker must hold every distinct retained topic in memory, indefinitely, until something overwrites or clears it.
+
+**Wildcards.** Subscribers do not have to name an exact topic. MQTT defines two wildcard characters. The single-level wildcard `+` matches one topic level, so `home/+/temperature` matches both `home/livingroom/temperature` and `home/kitchen/temperature`. The multi-level wildcard `#` matches everything below a point in the hierarchy, so `home/#` matches every topic under `home`, and a bare `#` matches *every topic on the broker*. Wildcards are a subscriber-side convenience that forces the broker to do matching work on every published message.
+
+**Sessions and QoS.** When a client connects, it establishes a *session*. If it connects with the clean-session flag cleared (a persistent session) and a Quality of Service level above 0, the broker promises to track delivery state for that client — queuing messages it missed, tracking acknowledgements, and holding all of that in memory keyed by the client's identifier. QoS 1 means "delivered at least once" and QoS 2 means "delivered exactly once," and both require the broker to remember in-flight message state per client. Sessions, in other words, are stateful, and state is memory, and memory is finite.
+
+Hold those four ideas in your head — unbounded topics, retained-message storage, wildcard matching cost, and per-session state — because each of my three attacks abuses exactly one of them.
+
+## The test harness
+
+I wanted a baseline that was defensible, not a strawman. Plenty of "MQTT is insecure" demonstrations start with an open broker bound to `0.0.0.0` with anonymous access enabled, which is like proving a house is insecure by leaving the front door open. That is not interesting. I wanted to attack a broker that a competent engineer would consider reasonably locked down, so that the failures I found would be failures of the protocol and its default resource model rather than failures of basic hygiene.
+
+The hardware was a Raspberry Pi 4 with 8 GB of RAM running a 64-bit OS, which is a fair stand-in for the kind of small edge gateway that aggregates sensor traffic in a building or a small plant. The broker was Mosquitto, the reference open-source MQTT broker maintained under the Eclipse Foundation. I configured it with:
+
+- **Authentication** — no anonymous access; every client had to present a username and password backed by a Mosquitto password file.
+- **ACLs** — an access control list restricting which authenticated identities could publish or subscribe to which topic prefixes, so a sensor account could not subscribe to administrative topics.
+- **Rate limiting** — per-client message throttling via `max_inflight_messages` and connection-level constraints.
+- **A defined client topology** — a fixed set of publisher and subscriber identities with a documented topic tree, so I had a clean picture of what "normal" traffic looked like.
+
+At rest, this broker idled at roughly 600 MB of resident memory and pushed well under 1 Mbit/s of traffic — the legitimate sensor chatter of the defined topology. That is my baseline. Every number in the attack sections is measured against it.
+
+The attacker was a separate machine on the same network segment, holding *valid credentials*. This is the threat model I find most realistic for IoT: the dangerous adversary is rarely an anonymous stranger on the internet, because the broker is usually behind a firewall. The dangerous adversary is a single compromised device — one sensor with a leaked password, one rogue contractor's laptop — that is already authenticated and inside the ACL boundary. Every attack below assumes the attacker can connect and is authorized to publish and subscribe within some slice of the topic tree. None of them require admin rights. That is what makes them worth taking seriously.
+
+I drove each vector with a small custom Python script using the `paho-mqtt` client library, and I watched the broker host with `htop` for memory and CPU and a packet counter for throughput. Everything that follows ran in an isolated lab on hardware I own.
+
+## Vector 1: the retained-message flood
+
+### How it works
+
+Recall that a retained message persists in the broker's memory, one slot per distinct topic, until it is overwritten or explicitly cleared. The broker has no idea how many distinct topics should exist, because topics are created implicitly on first publish. So the attack writes itself: publish a retained message to an enormous number of unique topics. Each one carves out a new permanent allocation in the broker's retained-message store.
+
+The trick is to make the topics unique so that none overwrites another, and to make them cheap to generate. A monotonic counter does the job. Here is the shape of the controlled test I ran:
+
+```python title="retained_flood.py" showLineNumbers
+import paho.mqtt.client as mqtt
+
+# Controlled lab test against a broker I own. Do not run this
+# against infrastructure you are not authorized to test.
+
+BROKER = "192.168.1.50"
+PORT = 1883
+USERNAME = "attacker"        # valid, authenticated, in-ACL identity
+PASSWORD = "redacted"
+
+client = mqtt.Client(client_id="flooder", clean_session=True)
+client.username_pw_set(USERNAME, PASSWORD)
+client.connect(BROKER, PORT, keepalive=60)
+client.loop_start()
+
+# 1 KB payload so each retained slot costs real memory, not just a key.
+payload = b"X" * 1024
+
+n = 0
+while True:
+    topic = f"flood/{n}"          # every topic is unique -> never overwrites
+    client.publish(topic, payload, qos=0, retain=True)
+    n += 1
+    if n % 100000 == 0:
+        print(f"published {n} retained topics")
+```
+
+Note `retain=True`. Without it, this is just a noisy publisher whose messages get dropped the moment no one is subscribed. *With* it, every single message becomes a permanent resident of the broker's memory.
+
+### Why it hurts the broker
+
+The broker is structurally obligated to keep retained messages. That is the contract of the retained flag: a client connecting tomorrow must be able to subscribe and immediately receive the last value. So the broker cannot simply discard them under pressure without violating its own delivery guarantee. There is no built-in upper bound on the *number* of retained topics in a default configuration, and there is no built-in cap on the *total payload size* of the retained store. The attacker is effectively allocating memory inside the broker process, one publish at a time, and the broker has no policy that says "stop."
+
+This is the cleanest example of the unbounded-topic-namespace problem. The cost of creating a new permanent allocation is one cheap publish from the attacker. The cost of holding it is borne entirely by the broker, forever.
+
+### What I observed
+
+This vector was the heavy hitter on memory. As the script ran, Mosquitto's resident memory climbed steadily and without plateau, marching from the 600 MB baseline up toward the full 8 GB of the Pi's RAM. There was no natural ceiling — the curve only stopped when the system itself ran out of physical memory and the kernel's out-of-memory killer or swap thrashing took over. The broker became unresponsive to legitimate clients well before it died, because allocation pressure starved the threads doing real work.
+
+### The mitigation
+
+There are two layers. First, cap the retained store. Mosquitto exposes `max_retained_messages`? — not directly by that name, but the practical control is to limit retained message size and, more importantly, to constrain *who* can publish retained messages at all via ACLs. Most sensors in a real topology have no business setting the retained flag. The cleaner architectural fix is to restrict the retained flag to a small set of trusted publishers and deny it everywhere else.
+
+Second, and more bluntly, set a payload ceiling and reject oversized or excessive messages:
+
+```ini title="mosquitto.conf" showLineNumbers {1}
+# Reject any single message larger than 256 KB.
+message_size_limit 262144
+
+# Cap simultaneous in-flight messages per client to blunt bulk publish.
+max_inflight_messages 20
+
+# Limit queued messages for offline persistent sessions.
+max_queued_messages 100
+```
+
+The deeper lesson is that retained messages are a privilege, not a default right. In my hardened rebuild, the attacker identity's ACL granted publish access to its topic subtree but the retained flag was reserved for a separate, tightly held administrative role. With that in place, the flood script's publishes were accepted as ordinary transient messages and dropped immediately, and memory never budged off baseline.
+
+## Vector 2: the wildcard topic storm
+
+### How it works
+
+The second vector attacks the matching engine instead of the storage layer. When a client subscribes with a wildcard, the broker must evaluate, for every published message, whether that message's topic matches the subscription. A bare `#` subscription means "match every message on the broker." Now imagine many clients each holding broad wildcard subscriptions, while a flood of messages pours in across a wide topic space. Every inbound message has to be tested against every wildcard subscription and then *copied and delivered* to each matching subscriber.
+
+The amplification is the point. One published message fanned out to N wildcard subscribers becomes N outbound messages. Combine a large fan-out with a high publish rate and you manufacture an enormous volume of broker work and network traffic out of a modest amount of attacker input. Here is the controlled subscriber side:
+
+```python title="wildcard_storm.py" showLineNumbers
+import paho.mqtt.client as mqtt
+import threading
+
+# Controlled lab test against a broker I own.
+
+BROKER = "192.168.1.50"
+PORT = 1883
+USERNAME = "attacker"
+PASSWORD = "redacted"
+
+# Many subscribers each grabbing the broadest possible wildcard.
+NUM_SUBSCRIBERS = 200
+
+def spawn_subscriber(i):
+    c = mqtt.Client(client_id=f"storm-sub-{i}", clean_session=True)
+    c.username_pw_set(USERNAME, PASSWORD)
+    c.connect(BROKER, PORT, keepalive=60)
+    c.subscribe("#", qos=0)        # match every topic on the broker
+    c.loop_forever()
+
+for i in range(NUM_SUBSCRIBERS):
+    threading.Thread(target=spawn_subscriber, args=(i,), daemon=True).start()
+
+# Meanwhile a separate publisher floods a wide topic space, and every
+# message is fanned out to all 200 wildcard subscribers.
+pub = mqtt.Client(client_id="storm-pub", clean_session=True)
+pub.username_pw_set(USERNAME, PASSWORD)
+pub.connect(BROKER, PORT, keepalive=60)
+pub.loop_start()
+
+payload = b"Y" * 1024
+n = 0
+while True:
+    pub.publish(f"storm/{n % 10000}", payload, qos=0)
+    n += 1
+```
+
+### Why it hurts the broker
+
+Two costs stack here. The first is CPU: topic matching against wildcard subscriptions is not free, and a bare `#` defeats any optimization that prunes the subscription tree by prefix. The second, and larger, cost is fan-out bandwidth and buffering. A single 1 KB publish matched by 200 wildcard subscribers becomes 200 KB of outbound delivery, plus the per-message bookkeeping for each. The broker has to hold those outbound copies in send buffers until each socket drains. When the publish rate outpaces the subscribers' ability to consume, those buffers grow.
+
+This is where the unbounded namespace and the matching cost combine into a traffic multiplier. The attacker spends a little; the broker and the network spend a lot.
+
+### What I observed
+
+This was the vector that lit up the network counter. Throughput exploded from the sub-1 Mbit/s baseline to the 600–700 Mbit/s range — saturating the Pi's effective network capacity. CPU on the broker pinned as it churned through matching and fan-out, and legitimate subscribers in the defined topology started seeing delivery latency climb as their messages queued behind the storm. Memory rose too, from the send-buffer accumulation, though this vector hurt throughput and CPU more than it hurt the retained store.
+
+The experience for a legitimate client was indistinguishable from the broker being down: messages stopped arriving on time, and the round trips a dashboard relies on stretched out past any reasonable timeout.
+
+### The mitigation
+
+The structural fix is to forbid broad wildcard subscriptions through ACLs. There is almost never a legitimate reason for an ordinary device to subscribe to `#`. Real subscribers know their topic subtree. So the ACL should deny `#` and deny overly broad `+` patterns, scoping every identity to the narrowest prefix it actually needs:
+
+```ini title="mosquitto.conf" showLineNumbers {1}
+# Point the broker at an ACL file that scopes every identity.
+acl_file /etc/mosquitto/acl
+
+# Disable anonymous access entirely.
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+
+And the ACL file itself, granting only narrow subtrees and never a bare wildcard:
+
+```ini title="acl" showLineNumbers {1}
+# A sensor identity may only publish to its own subtree.
+user sensor-livingroom
+topic write home/livingroom/#
+
+# A dashboard may read a specific area, never the whole broker.
+user dashboard-floor1
+topic read home/floor1/#
+```
+
+Beyond ACLs, cap the per-client connection rate and the number of concurrent connections so that 200 subscribers cannot materialize from one source in the first place. In my hardened rebuild, the attacker identity simply lacked authorization for any wildcard broad enough to matter; its subscription to `#` was rejected at the ACL check, and the fan-out multiplier collapsed to nothing.
+
+## Vector 3: session exhaustion
+
+### How it works
+
+The third vector is the subtlest, because it abuses the part of MQTT designed to be *helpful*: persistent sessions. When a client connects with a persistent session — clean-session cleared — and subscribes at QoS 1 or 2, the broker commits to remembering that client. It stores the client's subscriptions, queues messages the client misses while offline, and tracks in-flight delivery state, all keyed by the client identifier. Crucially, that state survives disconnection. The whole point is that the client can drop off and reconnect later and pick up where it left off.
+
+So the attack is to connect as a parade of distinct client identifiers, each establishing a persistent QoS session, then disconnect — leaving behind the durable session state — and repeat with a fresh identifier. Each abandoned session is a small, permanent allocation, and the broker keeps it because, as far as the broker knows, that client is coming back.
+
+```python title="session_exhaustion.py" showLineNumbers
+import paho.mqtt.client as mqtt
+import time
+
+# Controlled lab test against a broker I own.
+
+BROKER = "192.168.1.50"
+PORT = 1883
+USERNAME = "attacker"
+PASSWORD = "redacted"
+
+n = 0
+while True:
+    cid = f"ghost-session-{n}"        # a fresh identity every iteration
+    # clean_session=False -> persistent session the broker must retain.
+    c = mqtt.Client(client_id=cid, clean_session=False)
+    c.username_pw_set(USERNAME, PASSWORD)
+    c.connect(BROKER, PORT, keepalive=60)
+    # QoS 1 subscription forces the broker to track delivery state.
+    c.subscribe("home/#", qos=1)
+    c.loop_start()
+    time.sleep(0.05)
+    c.disconnect()                    # leave the persistent session behind
+    c.loop_stop()
+    n += 1
+```
+
+### Why it hurts the broker
+
+A persistent session is a promise the broker cannot unilaterally break. With no expiry policy, the broker has no way to know that `ghost-session-41873` is never coming back. It holds the subscriptions and any queued QoS messages indefinitely. Each session is individually small, but they accumulate without bound, and worse, every one of those sessions carries a `home/#` subscription, so any legitimate publish under `home` gets queued for thousands of dead sessions — multiplying the memory cost far beyond the bare session records.
+
+This is the per-session-state problem in its purest form. The attacker creates obligations the broker must honor and then vanishes, leaving the broker holding the bag for each abandoned identity.
+
+### What I observed
+
+Session exhaustion was the slow-burn vector and, in my testing, the one that produced the cleanest *outage*. Memory crept up as ghost sessions piled on — less explosively than the retained flood, but relentlessly, and with the queued-message multiplier compounding it as legitimate traffic fanned into thousands of dead session queues. Eventually the host crossed the line where memory pressure tipped into swap thrashing, and the broker stopped servicing connections entirely. That was the run that produced the complete outage lasting roughly 49 minutes: from the moment legitimate clients could no longer connect to the moment the broker, after manual intervention to clear the persistent state, returned to a healthy baseline.
+
+Forty-nine minutes is an eternity for an IoT gateway. If this broker were aggregating safety-relevant sensor data, that is forty-nine minutes of blindness.
+
+### The mitigation
+
+The decisive control is a *session expiry interval*. Persistent sessions should not live forever; they should expire after a bounded period of client absence so that abandoned state is reclaimed automatically. MQTT 5.0 makes this explicit with a session-expiry property, and brokers can enforce a maximum regardless of what the client requests. Combine that with a cap on the total number of persistent sessions and a per-source connection rate limit:
+
+```ini title="mosquitto.conf" showLineNumbers {1}
+# MQTT 5.0: cap how long an idle persistent session survives (seconds).
+# Reclaim abandoned session state after 5 minutes of absence.
+max_session_expiry_interval 300
+
+# Limit how many messages a dead session may accumulate.
+max_queued_messages 100
+
+# Throttle new connections from a single source.
+max_connections 1000
+persistent_client_expiration 1h
+```
+
+The `persistent_client_expiration` directive is Mosquitto's mechanism for evicting persistent clients that have been disconnected longer than the configured window — exactly the lever that defangs this attack. In my hardened rebuild, abandoned ghost sessions were reaped on a timer instead of accumulating, and the memory curve flattened into a sawtooth that never approached the danger zone.
+
+## The consolidated hardening runbook
+
+Pulling the three vectors together, here is the runbook I documented — the attack-to-remediation mapping, and the configuration that closes all three.
+
+| Vector | Resource abused | Symptom | Primary mitigation |
+| --- | --- | --- | --- |
+| Retained-message flood | Retained store memory | Memory climbs to 8 GB, no ceiling | Restrict retained flag via ACL; `message_size_limit` |
+| Wildcard topic storm | CPU + fan-out bandwidth | Traffic 600–700 Mbit/s; latency spike | Deny broad wildcards in ACL; connection caps |
+| Session exhaustion | Per-session state memory | Slow memory creep to outage | `persistent_client_expiration`; session expiry |
+
+And the principles, in order of leverage:
+
+1. **Never allow anonymous access.** `allow_anonymous false` and a real password file are table stakes. Everything else assumes authenticated identities.
+2. **Treat ACLs as the primary defense, not a formality.** The single highest-leverage control across all three attacks was scoping each identity to the narrowest topic subtree it needs and denying broad wildcards and the retained flag by default. Two of my three vectors collapsed entirely under a strict ACL.
+3. **Bound every unbounded thing.** Cap message size, in-flight messages, queued messages, connection counts, and session lifetime. MQTT's defaults are generous because the protocol targets cooperative clients; a hostile client treats every uncapped resource as an allocation primitive.
+4. **Expire persistent sessions.** Use `persistent_client_expiration` and, on MQTT 5.0, enforce a maximum session-expiry interval. Durable state with no expiry is a memory leak waiting for an attacker.
+5. **Monitor the broker's own metrics.** Mosquitto publishes `$SYS` topics with live counts of clients, messages, and memory. Alert on retained-message count, persistent-session count, and resident memory crossing a threshold. Every one of my attacks was visible in `$SYS` minutes before the broker fell over.
+
+Here is a single hardened `mosquitto.conf` that combines the controls:
+
+```ini title="mosquitto.conf" showLineNumbers {1}
+# --- Authentication ---
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
+
+# --- Message and queue bounds ---
+message_size_limit 262144
+max_inflight_messages 20
+max_queued_messages 100
+
+# --- Connection and session bounds ---
+max_connections 1000
+persistent_client_expiration 1h
+max_session_expiry_interval 300
+```
+
+## Closing lessons
+
+The thing that stayed with me is that none of these attacks exploited a bug. There was no buffer overflow, no parsing flaw, no CVE. Every vector used MQTT exactly as designed — retained messages persist, wildcards match broadly, sessions are durable — and turned a *feature* into a weapon by spending a little attacker effort to create a large, unbounded obligation on the broker. The protocol is not broken. It is doing precisely what it promised. The failure is that the default resource model assumes cooperative clients, and a single authenticated-but-hostile device violates that assumption completely.
+
+That reframes the threat model for me. The internet-facing anonymous attacker is the easy case; a firewall and `allow_anonymous false` handle it. The case that actually matters for IoT is the insider — one compromised sensor, one leaked credential — operating *within* the authentication and ACL boundary. Against that adversary, the only durable defenses are the boring ones: scope every identity to the minimum, bound every resource, expire every piece of durable state, and watch the broker's own telemetry for the slope changes that precede a fall.
+
+A broker is a single point of failure by definition. Hardening it is not about trusting clients less in some abstract sense; it is about ensuring that no single client — authenticated or not — can convert the broker's helpfulness into its own destruction. Forty-nine minutes of outage on a Raspberry Pi taught me that lesson more vividly than any advisory could.
+
+## References
+
+- [MQTT Version 5.0 Specification (OASIS)](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html)
+- [Eclipse Mosquitto documentation](https://mosquitto.org/documentation/)
+- [`mosquitto.conf` manual page](https://mosquitto.org/man/mosquitto-conf-5.html)
+- [Eclipse Paho Python client](https://eclipse.dev/paho/index.php?page=clients/python/index.php)

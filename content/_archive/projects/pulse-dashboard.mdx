@@ -1,0 +1,44 @@
+---
+title: "Pulse"
+year: "2023"
+role: "Frontend Engineering"
+summary: "A real-time analytics dashboard streaming thousands of events per second into live charts."
+stack: ["React", "D3", "WebSockets"]
+tags: ["Data Viz", "Realtime"]
+liveUrl: "https://pulse.example"
+featured: false
+order: 5
+---
+
+Pulse is a live analytics dashboard that turns a firehose of incoming events into charts that update smoothly in real time, without melting the browser.
+
+## Problem
+
+The team needed to watch product activity as it happened rather than waiting for hourly rollups. The event stream peaked at thousands of messages per second, and naive approaches buckled fast. Updating React state on every message triggered a re-render storm, and redrawing entire D3 charts that often pinned the main thread and froze the page.
+
+The challenge was rendering a continuously moving picture of live data while keeping the interface responsive on an ordinary laptop.
+
+## Approach
+
+Events arrive over a WebSocket connection. Instead of pushing each message straight into component state, Pulse buffers incoming events and flushes the buffer once per animation frame. That decouples the network rate from the render rate, so a burst of a thousand messages still produces exactly one visual update per frame.
+
+```ts title="useEventStream.ts" showLineNumbers
+const buffer: Event[] = [];
+
+socket.onmessage = (msg) => {
+  buffer.push(JSON.parse(msg.data));
+};
+
+function flush() {
+  if (buffer.length > 0) {
+    applyBatch(buffer.splice(0));
+  }
+  requestAnimationFrame(flush);
+}
+```
+
+D3 handles the scales and data binding while React owns the DOM, which avoids the two libraries fighting over the same nodes. Charts keep a fixed-size sliding window of recent points, so memory stays bounded no matter how long the dashboard runs. Aggregation across the window is precomputed in the flush step rather than during render.
+
+## Outcome
+
+Pulse sustains thousands of events per second while holding a steady sixty frames per second on a typical laptop, with the main thread staying responsive enough to pan and hover without stutter. The frame-batched buffer was the single change that made the difference, turning an unusable prototype into something the team now keeps open on a wall display. Bounded memory means it runs for days without a refresh. The pattern of batching streamed updates to the animation frame has since been reused across several other realtime views.

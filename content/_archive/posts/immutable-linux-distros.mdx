@@ -1,0 +1,71 @@
+---
+title: "The Rise of Immutable Linux Distros"
+date: "2026-06-12"
+excerpt: "How image-based, read-only Linux distributions deliver atomic updates, easy rollback, and a new way to install software."
+category: "Linux"
+tags: ["Linux", "Distros", "DevOps"]
+author: "The Author"
+---
+
+A new generation of Linux distributions throws out a long-held assumption: that the operating system is a mutable pile of files you edit in place. Immutable, or image-based, distros instead ship the OS as a versioned image with a read-only root filesystem. The result is dramatically more reliable updates and rollbacks.
+
+## What "immutable" actually means
+
+In a traditional distro, `dnf` or `apt` installs packages by writing files directly into `/usr`, `/etc`, and elsewhere. Over months these mutations diverge from any clean baseline, and a failed upgrade can leave a half-broken system.
+
+Immutable distros flip the model:
+
+- The root filesystem is **read-only**, so the core OS cannot drift.
+- Updates are **atomic**: a new image is staged in full and switched to on reboot, never applied piecemeal.
+- **Rollback** is trivial because the previous image is still on disk; you just boot it.
+
+Your data in `/home` and your configuration in `/etc` remain writable. Only the OS itself is locked down.
+
+## The major approaches
+
+Several projects implement this idea in different ways:
+
+- **Fedora Silverblue** and its siblings use **ostree**, a system that versions the whole filesystem tree like Git versions source code, managed by `rpm-ostree`.
+- **NixOS** builds the entire system declaratively from a configuration file; every change produces a new generation you can boot or roll back to.
+- **openSUSE MicroOS** uses Btrfs snapshots with transactional updates.
+- **bootc / image mode** (used by Fedora and now available for RHEL) lets you build and ship the OS as an OCI container image, the same format used for application containers.
+
+## Atomic updates and rollback in practice
+
+With `rpm-ostree`, an upgrade downloads a new deployment and leaves your running one untouched until reboot. If the new one misbehaves, the bootloader lets you pick the old deployment, or you roll back with one command.
+
+```bash title="rpm-ostree.sh" showLineNumbers {2,5,8}
+# Stage the latest OS image
+sudo rpm-ostree upgrade
+
+# List deployments; the booted one is marked
+rpm-ostree status
+
+# Roll back to the previous deployment
+sudo rpm-ostree rollback
+```
+
+NixOS expresses the same reliability declaratively. You edit one file and rebuild; the generation system preserves prior states.
+
+```bash title="nixos-rebuild.sh" showLineNumbers {2,5}
+# Apply /etc/nixos/configuration.nix and switch to it
+sudo nixos-rebuild switch
+
+# Boot an older generation if something broke (from the boot menu),
+# or roll back the current profile
+sudo nixos-rebuild switch --rollback
+```
+
+## How you install software
+
+Since the root is read-only, you do not sprinkle packages across the system. Instead:
+
+- **Flatpak** for graphical applications, installed per-user and sandboxed.
+- **toolbox or distrobox** for development: a mutable container where you can `dnf install` freely without touching the host.
+- **Layering** (`rpm-ostree install`) for the rare package that must live on the host, such as a driver or a shell, which is added to the image at update time.
+
+> Tip: Reach for a distrobox container first when you just need build tools or a quick experiment. Reserve host layering for things that genuinely cannot live in a container.
+
+## The tradeoffs
+
+Immutability buys reliability and reproducibility at the cost of a mental-model shift. You cannot casually edit system files, and workflows that assume a writable root need rethinking. For servers, fleets, and anyone who values predictable rollbacks, that trade is increasingly worth it, which is exactly why image-based distros are spreading from hobbyist desktops into mainstream enterprise offerings.

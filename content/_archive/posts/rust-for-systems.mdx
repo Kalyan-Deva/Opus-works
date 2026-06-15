@@ -1,0 +1,69 @@
+---
+title: "Why Rust for Systems Programming"
+date: "2026-03-20"
+excerpt: "How Rust delivers memory safety without a garbage collector, and why it keeps showing up in low-level software."
+category: "Engineering"
+tags: ["Rust", "Systems"]
+author: "The Author"
+---
+
+Systems programming has long meant choosing between safety and control. Managed languages give you safety with a garbage collector and runtime overhead; C and C++ give you control but make memory bugs your problem. Rust's central claim is that you do not have to choose.
+
+## Ownership and borrowing
+
+Rust enforces memory safety at compile time through ownership. Every value has exactly one owner, and when the owner goes out of scope the value is freed. Instead of copying or garbage collecting, you *borrow* references, and the compiler's borrow checker guarantees those references never outlive the data.
+
+```rust title="ownership.rs" showLineNumbers {6,9}
+fn main() {
+    let mut data = vec![1, 2, 3];
+
+    // An immutable borrow: many readers allowed at once.
+    let first = &data[0];
+    println!("first = {first}");
+
+    // A mutable borrow: exclusive, and only after readers are done.
+    data.push(4);
+    println!("len = {}", data.len());
+}
+```
+
+The rule is simple: you may have many immutable references *or* exactly one mutable reference, never both at once. Try to mutate `data` while `first` is still in use and the program will not compile. That single rule eliminates data races and use-after-free at build time.
+
+## Safety without a garbage collector
+
+Because the compiler knows exactly when each value's lifetime ends, it inserts the deallocation for you. There is no GC pause, no reference-counting overhead unless you opt into it with `Rc` or `Arc`, and no hidden runtime. The resulting binaries are predictable enough for kernels, embedded targets, and hard real-time-adjacent work.
+
+## Fearless concurrency
+
+The same ownership rules apply across threads. The `Send` and `Sync` marker traits let the compiler reject code that would share mutable state unsafely. A data race becomes a compile error rather than a Heisenbug you chase in production.
+
+```rust title="concurrency.rs" showLineNumbers {4}
+use std::thread;
+
+let handles: Vec<_> = (0..4)
+    .map(|i| thread::spawn(move || i * i))
+    .collect();
+
+let total: i32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+```
+
+## Zero-cost abstractions
+
+Iterators, generics, and traits compile down to the same machine code you would have written by hand. You get high-level expressiveness with no runtime tax, which is why hot loops written with iterator chains are as fast as manual indexing.
+
+## The cargo ecosystem
+
+`cargo` handles builds, dependencies, testing, and publishing in one tool. A dependency is one line in `Cargo.toml`:
+
+```toml title="Cargo.toml" showLineNumbers
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+```
+
+The crates.io registry and a strong tooling story (rustfmt, clippy) lower the friction that often plagues C and C++ projects.
+
+> Tip: When you genuinely need raw pointers or FFI, `unsafe` blocks let you opt out of the checks in a small, auditable scope rather than across the whole program.
+
+## Where Rust is showing up
+
+Rust has been merged into the Linux kernel as a supported second language for drivers, and it underpins widely used developer tooling such as the ripgrep search tool and parts of several browser engines. Adoption is broad and growing, particularly where teams want C-level performance with far fewer memory-safety incidents.

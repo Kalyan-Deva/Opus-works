@@ -1,0 +1,78 @@
+---
+title: "Zero Trust Architecture: From Buzzword to Blueprint"
+date: "2026-01-20"
+excerpt: "What zero trust actually means, grounded in NIST SP 800-207, and how to translate its principles into identity, segmentation, and policy."
+category: "Security"
+tags: ["Security", "Networking", "Architecture"]
+author: "The Author"
+---
+
+"Zero trust" gets thrown around as a product you can buy. It is not. It is an architectural approach, defined rigorously in **NIST SP 800-207**, where access decisions are made per request based on identity and context rather than network location.
+
+## The core principles
+
+NIST frames zero trust around a simple shift: stop trusting the network. The guiding ideas are:
+
+- **Never trust, always verify.** No request is trusted because it came from inside the perimeter.
+- **Least privilege.** Grant the minimum access needed, for the minimum time.
+- **Assume breach.** Design as if an attacker is already inside, and limit how far they can move.
+
+The classic castle-and-moat model fails because once an attacker is past the firewall, they roam freely. Zero trust removes the implicit trust of "inside."
+
+## The identity-centric perimeter
+
+In SP 800-207 the heart of the system is the **Policy Decision Point (PDP)** and **Policy Enforcement Point (PEP)**. Every access attempt flows through a PEP, which asks the PDP whether to allow it. The decision draws on:
+
+- The authenticated identity of the user or workload.
+- Device posture and health.
+- Resource sensitivity and request context.
+
+The perimeter becomes identity, not IP range. Strong authentication (MFA, phishing-resistant credentials) is the foundation.
+
+## Microsegmentation and mTLS
+
+Assume-breach means limiting lateral movement. **Microsegmentation** divides the network into small zones so a compromised workload cannot reach everything. Between services, **mutual TLS (mTLS)** ensures both sides prove identity with certificates, not just the client trusting the server.
+
+A service mesh can enforce this. Here is a minimal policy that requires mTLS and restricts who may call a service:
+
+```yaml title="payments-policy.yaml" showLineNumbers {6,12}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: payments-mtls
+spec:
+  mtls:
+    mode: STRICT          # reject any non-mTLS traffic
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: payments-allow
+spec:
+  selector:
+    matchLabels:
+      app: payments
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/checkout/sa/checkout"]
+```
+
+This says: only the `checkout` service account may call `payments`, and only over verified mTLS. Every other request is denied by default.
+
+## A practical blueprint
+
+You do not rebuild everything at once. A pragmatic path:
+
+1. **Inventory** identities, devices, and the resources worth protecting.
+2. **Centralize identity** behind a single strong IdP with MFA.
+3. **Put a PEP in front of sensitive resources** (an identity-aware proxy or gateway).
+4. **Segment** the highest-value workloads first, then expand.
+5. **Enforce mTLS** between services as you migrate to a mesh.
+6. **Log every decision** so the PDP's choices are auditable.
+
+> Tip: Start with one critical application end to end rather than trying to "zero-trust" the whole network. A complete vertical slice teaches you more than a broad, shallow rollout.
+
+## The payoff
+
+Done well, zero trust shrinks the blast radius of any single compromise. A stolen credential no longer means free movement across the environment, because each hop is independently verified against policy. That is the difference between a buzzword and a blueprint.

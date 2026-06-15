@@ -1,0 +1,167 @@
+---
+title: "Ransomware in 2026: Encryptionless, Post-Quantum, and AI-Assisted"
+date: "2026-06-02"
+excerpt: "Ransomware changed shape in 2026 — fewer locked files, more pure extortion, quantum-resistant ciphers, and AI in the loop. A data-backed look at where it's heading."
+category: "Security"
+tags: ["Security", "Ransomware", "Cryptography", "Threat Intelligence"]
+author: "Kalyan Gopalam"
+---
+
+For most of the past decade, the mental model of a ransomware attack was simple: an intruder gets in, spreads, encrypts your files, and drops a note demanding payment for the decryption key. That model still exists, but in 2026 it describes a shrinking fraction of the threat. The economics underneath the crime have shifted, and the tooling has evolved in ways that should change how defenders think about the problem.
+
+The clearest signal of the shift is in the money. According to Kaspersky's [State of Ransomware in 2026](https://securelist.com/state-of-ransomware-in-2026/119761/) report, the ransom payment rate fell to roughly 28% in 2025. Fewer victims are paying. That decline is partly a victory — better backups, clearer regulatory guidance, and a hardening industry consensus that paying funds the next attack. But criminals do not simply absorb a falling conversion rate. They adapt the product. When encryption stops reliably extracting payment, the business model pivots toward what does: the threat of exposure.
+
+This article walks through the most consequential changes in the 2026 ransomware landscape — the move to encryptionless extortion, the appearance of post-quantum ciphers inside malware, the normalization of driver-based defense evasion, the shift in how attackers buy their way in, the current group landscape, the law-enforcement response, and finally the defenses that actually map to these developments. The throughline is that "ransomware" is increasingly a misnomer. The ransom is still the goal; the encryption is now optional.
+
+## Encryptionless extortion: the ransom without the lock
+
+The most important structural change is that encryption is becoming a secondary tactic rather than the centerpiece. Kaspersky's report describes attackers [increasingly relying on data-theft threats rather than encryption](https://securelist.com/state-of-ransomware-in-2026/119761/) — so-called encryptionless extortion. Instead of scrambling files in place, the attacker exfiltrates sensitive data and threatens to publish it unless paid.
+
+There are sound criminal reasons for this. Encryption is noisy. Mass file-modification is exactly the behavior endpoint detection and response (EDR) products are tuned to catch, and triggering it late in an intrusion risks losing the operation before any leverage is established. Encryption is also operationally fragile: building a reliable cryptosystem that locks files and reliably unlocks them on payment is harder than it looks, and botched implementations have burned attacker reputations and victim trust alike. Pure data theft sidesteps all of that. Exfiltration can masquerade as ordinary outbound traffic, and once the data is on the attacker's infrastructure, the leverage exists whether or not a single file on the victim's network is ever touched.
+
+The shift also changes the recovery calculus for victims, and not in their favor. A clean, tested backup defeats encryption — you wipe and restore. A backup does nothing about stolen data that is already sitting on a leak site. The threat is no longer "you cannot access your files"; it is "your customers, regulators, and competitors are about to access your files." That is a fundamentally different problem, and it is why a strong backup posture, while still essential, is no longer sufficient on its own.
+
+The May 2026 incident roundup illustrates the pattern. In one case documented in CM-Alliance's [May 2026 attacks roundup](https://www.cm-alliance.com/cybersecurity-blog/biggest-cyber-attacks-data-breaches-ransomware-attacks-of-may-2026), the World Leaks group claimed an 8.5 TB theft from Mediaworks on May 4, including payroll and contract data — a pure data-leak extortion play. On May 18, the group TeamPCP stole source code from Grafana Labs, which [refused to pay the ransom](https://www.cm-alliance.com/cybersecurity-blog/biggest-cyber-attacks-data-breaches-ransomware-attacks-of-may-2026). On May 29, the Silent Ransom Group hit Plaza Home Mortgage. None of these are defined by file encryption; they are defined by data in the wrong hands. Traditional encryption attacks have not vanished — West Pharmaceutical Services [had systems encrypted with manufacturing disrupted](https://www.cm-alliance.com/cybersecurity-blog/biggest-cyber-attacks-data-breaches-ransomware-attacks-of-may-2026) on May 15 — but they now share the stage with extortion that never locks a thing.
+
+## Post-quantum ciphers show up in malware
+
+The second development is genuinely novel, and it is the kind of thing that sounds like marketing until you see it in a sample. Kaspersky reports that the PE32 ransomware family adopted the [ML-KEM standard using the Kyber1024 algorithm](https://securelist.com/state-of-ransomware-in-2026/119761/) for "quantum-resistant" encryption.
+
+To understand why this matters, a brief primer. ML-KEM (Module-Lattice-based Key Encapsulation Mechanism) is the algorithm standardized by NIST in 2024 as FIPS 203, derived from the CRYSTALS-Kyber submission. It is a key-encapsulation mechanism: rather than encrypting bulk data directly, it securely establishes a shared symmetric key between two parties, which is then used with a fast symmetric cipher like AES to encrypt the actual payload. Kyber1024 is the highest-security parameter set, targeting roughly the strength category associated with AES-256. Its security rests on the hardness of lattice problems, which — unlike the integer-factorization and discrete-log problems behind RSA and elliptic-curve cryptography — are not known to be efficiently solvable by a large quantum computer running Shor's algorithm.
+
+In legitimate systems, the motivation for moving to ML-KEM is the "harvest now, decrypt later" threat: an adversary records encrypted traffic today and decrypts it years from now once a cryptographically relevant quantum computer exists. For ransomware, that long-horizon threat model is mostly irrelevant — a victim's files are leverage for days or weeks, not decades. So why would attackers bother?
+
+The honest answer is that the practical benefit to the criminal is marginal, and the move is best read as a signal rather than a breakthrough. It tells defenders three things. First, ransomware developers are tracking modern cryptographic standards closely and will adopt new primitives quickly once reference implementations are widely available. Second, the marketing value is real within criminal markets — "quantum-resistant" is a selling point for a ransomware-as-a-service (RaaS) affiliate program, the same way it is for a legitimate vendor. Third, and most usefully for defenders, it underscores that you cannot break modern ransomware encryption by attacking the math. A correct ML-KEM-plus-AES implementation has no decryption shortcut. Recovery has to come from prevention and from backups, never from cryptanalysis. The cipher choice is, in that sense, a reminder that the entire "wait for a flaw in the crypto" strategy is dead.
+
+## BYOVD: the EDR killers go mainstream
+
+If encryptionless extortion changes the goal and post-quantum ciphers change the marketing, BYOVD changes the kill chain. Kaspersky's report notes that [Bring Your Own Vulnerable Driver attacks became a standard ransomware playbook component](https://securelist.com/state-of-ransomware-in-2026/119761/) — what the field calls "EDR killers."
+
+BYOVD works by exploiting the trust the operating system places in signed kernel drivers. On Windows, code running in the kernel has the highest level of privilege and can do things user-mode security software cannot prevent — including terminating protected processes, unhooking telemetry, and tampering with the very EDR agent that is supposed to be watching. The attacker does not need to find a fresh kernel vulnerability. They bring a legitimately signed but vulnerable driver — one with a known flaw — load it onto the target, and abuse that flaw to execute their own code in the kernel. Because the driver carries a valid signature, default driver-signing enforcement waves it through.
+
+The technique is attractive precisely because it neutralizes the defender's best sensor. Once an EDR agent is blinded or killed, the noisy late-stage behaviors — credential dumping, lateral movement, mass file changes — proceed without the detections that would normally fire. BYOVD is, in effect, a way to buy back the stealth that encryption costs. Its normalization across ransomware operations in 2026 means defenders can no longer assume that "EDR is deployed" equals "EDR is watching." The agent's own integrity is now part of the attack surface.
+
+## Initial access: RDWeb replaces exposed RDP
+
+Attackers have to get in before any of this happens, and the front door changed. For years, the canonical ransomware entry point was an internet-exposed Remote Desktop Protocol (RDP) port — brute-forced or bought from an access broker. In 2026, Kaspersky reports that [RDWeb portals replaced exposed RDP as the preferred initial-access vector](https://securelist.com/state-of-ransomware-in-2026/119761/) among access brokers.
+
+RDWeb — Remote Desktop Web Access — is the browser-facing front end for Microsoft's Remote Desktop Services. Rather than exposing raw RDP on port 3389, organizations publish a web portal where users authenticate and launch published applications or desktops. The shift to RDWeb as the preferred vector reflects how defenders responded to the old RDP problem: years of guidance to stop exposing port 3389 directly pushed organizations toward web-fronted access. Attackers followed. An RDWeb portal is a login page, which makes it a natural target for credential stuffing, password spraying, and phishing — and because it is "just a website," it sometimes escapes the scrutiny applied to traditional remote-access infrastructure. Multi-factor authentication on these portals is the single most important control, and its absence is a common precondition for the access brokers who feed the RaaS ecosystem.
+
+## The 2026 group landscape
+
+The operator side of the ecosystem reorganized as well. Based on Kaspersky's [2026 ranking](https://securelist.com/state-of-ransomware-in-2026/119761/), the table below summarizes the most relevant groups. The "established" tier represents the high-volume operations defining the threat; the "emerging" tier represents 2026 newcomers worth tracking.
+
+| Group | Note |
+| --- | --- |
+| Qilin | Dominant RaaS platform since Q2 2025 |
+| Clop | Large-scale supply-chain attacks targeting hundreds of organizations simultaneously |
+| Akira | Notable for consistent operational tempo |
+| The Gentlemen | Emerging actor that surfaced in 2026 |
+| DragonForce | Emerging group |
+| Devman | Emerging group |
+| MintEye | Emerging group |
+| DireWolf | Emerging group |
+| NightSpire | Emerging group |
+| Vect | Emerging group |
+| Tengu | Emerging group |
+| Kazu | Emerging group |
+
+A few patterns are worth drawing out. Qilin's rise to a dominant RaaS platform since Q2 2025 reflects the broader industrialization of ransomware: the most successful operations are platforms, renting tooling and infrastructure to affiliates and taking a cut, rather than crews that personally run every intrusion. Clop's specialization in supply-chain attacks — compromising one widely used product or service to reach hundreds of downstream victims at once — is the high-leverage end of the spectrum, where a single exploited file-transfer or managed-service vulnerability cascades into mass extortion. Akira's defining trait is simply consistency: a steady operational tempo that keeps it relevant without the spikes that draw maximum law-enforcement attention.
+
+The long tail of emerging groups matters too. The sheer number of 2026 newcomers — eight named emerging actors plus The Gentlemen — signals low barriers to entry. The RaaS model means an affiliate does not need to write a cipher or build a leak site; they rent them. That is precisely why takedowns of shared infrastructure, discussed next, punch above their weight.
+
+## Law enforcement pushes back
+
+The defensive picture is not entirely grim. Coordinated law-enforcement action continued to disrupt the ecosystem's connective tissue — the forums and leak sites that let operators recruit affiliates, trade access, and pressure victims. Kaspersky documents several seizures: the [RAMP forum was seized in January 2026 and LeakBase in March 2026](https://securelist.com/state-of-ransomware-in-2026/119761/), following the takedown of the [BlackSuit and 8Base data-leak sites in 2025](https://securelist.com/state-of-ransomware-in-2026/119761/).
+
+These actions target the marketplace rather than any single binary, and that is the right pressure point in a platform economy. RAMP and LeakBase were venues — places where access brokers sold the RDWeb credentials that seed intrusions and where affiliates found work. Seizing a leak site like 8Base or BlackSuit does more than remove a website; it undermines the core threat behind encryptionless extortion, because the entire model depends on a credible, reachable place to publish stolen data. Takedowns rarely end a group permanently — operators rebrand, infrastructure reconstitutes — but each one imposes cost, erodes trust among criminals who must wonder whether a forum is already controlled by investigators, and buys defenders time. In an ecosystem built on shared, rented infrastructure, attacking the shared layer is leverage.
+
+## Defenses that map to the 2026 threat
+
+The developments above point to a specific defensive posture. The old advice — patch, segment, deploy EDR, back up — is still correct, but each pillar needs to be sharpened against the 2026 reality. Here is how to align defenses with the threat as it actually exists now.
+
+### Immutable, offline backups with tested restores
+
+Backups remain the foundation, but with two non-negotiable refinements. First, at least one copy must be immutable or offline — object-lock, write-once storage, or a genuinely air-gapped copy — because attackers routinely hunt for and delete backups before acting, and stolen admin credentials must not be able to reach the recovery copy. Second, and more often neglected: restores must be tested on a schedule. A backup you have never restored is a hypothesis, not a recovery plan. The encryptionless trend does narrow what backups buy you — they defeat encryption, not exposure — but a fast, proven restore is still what turns an encryption event into an outage rather than a closure.
+
+A backup is only as good as your last verified restore. Treat verification as a first-class job, not an afterthought:
+
+```bash title="verify-restore.sh" showLineNumbers
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Restore the latest snapshot into an isolated scratch area and
+# confirm integrity before trusting it as a recovery point.
+SNAPSHOT="${1:?usage: verify-restore.sh <snapshot-id>}"
+SCRATCH="$(mktemp -d /var/restore-test.XXXXXX)"
+MANIFEST="/secure/manifests/${SNAPSHOT}.sha256"
+
+trap 'rm -rf "$SCRATCH"' EXIT
+
+echo "[*] Restoring ${SNAPSHOT} into ${SCRATCH}"
+restic restore "$SNAPSHOT" --target "$SCRATCH"
+
+echo "[*] Verifying file integrity against signed manifest"
+if sha256sum --quiet --check "$MANIFEST" --strict; then
+  echo "[+] Restore verified: all checksums match"
+else
+  echo "[!] INTEGRITY FAILURE — this recovery point is NOT trustworthy" >&2
+  exit 1
+fi
+
+echo "[*] Confirming backup copy is immutable (object-lock retained)"
+aws s3api get-object-retention \
+  --bucket backups-immutable \
+  --key "${SNAPSHOT}.restic" \
+  --query 'Retention.Mode' --output text | grep -q COMPLIANCE \
+  && echo "[+] Object-lock COMPLIANCE mode confirmed"
+```
+
+### EDR tamper protection
+
+Because BYOVD specifically targets the EDR agent, tamper protection is no longer optional. Enable the EDR vendor's self-protection and tamper-protection features, and — critically — monitor for the agent itself going silent. An endpoint that stops reporting telemetry should be treated as a potential compromise, not a routine outage. Alerting on EDR agent health is one of the highest-value detections you can add in 2026, because the absence of signal is the signal.
+
+### Driver allowlisting and blocklisting
+
+The direct countermeasure to BYOVD is to stop vulnerable drivers from loading. On Windows, Microsoft maintains a recommended driver blocklist enforced through Windows Defender Application Control (WDAC) and Hypervisor-Protected Code Integrity (HVCI). Enable HVCI and apply the vulnerable-driver blocklist so that known-abusable drivers are refused at load time. For higher-assurance environments, move from blocklisting (deny known-bad) to allowlisting (permit only known-good) drivers, which closes the gap left by drivers not yet on any blocklist.
+
+```xml title="driver-blocklist-policy.xml" showLineNumbers
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WDAC policy fragment: deny a known BYOVD-abused driver by file hash.
+     Apply alongside Microsoft's recommended driver blocklist + HVCI. -->
+<SiPolicy xmlns="urn:schemas-microsoft-com:sipolicy">
+  <Rules>
+    <Rule><Option>Enabled:Unsigned System Integrity Policy</Option></Rule>
+    <Rule><Option>Enabled:Boot Audit On Failure</Option></Rule>
+  </Rules>
+  <FileRules>
+    <Deny ID="ID_DENY_VULN_DRIVER_1"
+          FriendlyName="Block known vulnerable driver (BYOVD)"
+          Hash="A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F90" />
+  </FileRules>
+  <SigningScenarios>
+    <SigningScenario Value="131" ID="ID_SIGNINGSCENARIO_DRIVERS">
+      <ProductSigners>
+        <FileRulesRef>
+          <FileRuleRef RuleID="ID_DENY_VULN_DRIVER_1" />
+        </FileRulesRef>
+      </ProductSigners>
+    </SigningScenario>
+  </SigningScenarios>
+</SiPolicy>
+```
+
+### Identity hardening
+
+Since RDWeb portals are the preferred initial-access vector, identity is the new perimeter. Enforce phishing-resistant multi-factor authentication on every internet-facing authentication surface — RDWeb, VPN, and administrative consoles especially. Password spraying and credential stuffing against a portal are defeated by MFA in a way they simply are not by password policy alone. Pair that with conditional access (restrict logins by geography or device posture), aggressive lockout on the portal, and monitoring for impossible-travel and spray patterns. The access brokers feeding the RaaS economy are buying valid credentials; the goal is to make those credentials useless without a second factor the attacker cannot phish.
+
+## Where this leaves defenders
+
+The 2026 picture is one of adaptation on both sides. Attackers responded to falling payment rates and better backups by changing the product: less encryption, more exposure; modern ciphers as a selling point; the EDR agent itself as a target; web portals as the way in. Defenders responded with immutable backups, tamper protection, driver control, and MFA — and law enforcement kept dismantling the shared infrastructure the whole economy runs on.
+
+The single most important conceptual update is to stop equating ransomware with encryption. The crime is extortion; encryption is one optional means to that end, and an increasingly unpopular one. A defense program built only to recover encrypted files is solving the 2021 problem. The 2026 problem is keeping data from leaving in the first place, keeping your sensors alive while the attacker is inside, and closing the identity front door before any of it begins. The math is not going to save you — your architecture has to.
+
+## Sources
+
+- Kaspersky Securelist — [State of Ransomware in 2026](https://securelist.com/state-of-ransomware-in-2026/119761/)
+- CM-Alliance — [Biggest Cyber Attacks, Data Breaches & Ransomware Attacks of May 2026](https://www.cm-alliance.com/cybersecurity-blog/biggest-cyber-attacks-data-breaches-ransomware-attacks-of-may-2026)

@@ -1,0 +1,73 @@
+---
+title: "Git Internals: What Really Happens on Commit"
+date: "2026-01-15"
+excerpt: "A tour of Git's object model and content-addressable storage that explains why branches are so cheap."
+category: "Engineering"
+tags: ["Git", "Tooling"]
+author: "The Author"
+---
+
+Most people learn Git as a set of commands to memorize. But underneath the porcelain is a small, elegant data model: a content-addressable key-value store. Once you see it, commands like `branch`, `reset`, and `rebase` stop feeling like magic.
+
+## Four object types
+
+Everything Git tracks lives in `.git/objects` as one of four object types:
+
+- **Blob:** the raw contents of a file. No filename, no permissions, just bytes.
+- **Tree:** a directory listing that maps names to blobs and other trees, along with their modes.
+- **Commit:** a snapshot pointer to one tree, plus parent commit(s), author, committer, and message.
+- **Tag:** an annotated, named pointer to another object (usually a commit).
+
+## Content-addressable storage
+
+Every object is stored under the SHA-1 (or SHA-256 in newer repos) hash of its contents. The hash *is* the address. Identical content always produces the same hash, so Git never stores the same blob twice.
+
+You can compute a hash yourself with `git hash-object`:
+
+```bash title="hash.sh" showLineNumbers {2}
+echo 'hello git' | git hash-object --stdin
+# 8d0e41234f24b6da002d962a26c2495ea16a425f
+```
+
+That same value would appear in the object database if you actually wrote the blob. To read any object back, use `git cat-file`:
+
+```bash title="inspect.sh" showLineNumbers {1,4}
+git cat-file -t HEAD        # type: commit
+git cat-file -p HEAD        # pretty-print the commit
+# tree a1b2c3...
+# parent d4e5f6...
+git cat-file -p HEAD^{tree} # the tree this commit points to
+```
+
+## What a commit actually contains
+
+When you run `git commit`, Git does three things. First it writes a tree object representing the staged snapshot (the index). Then it creates a commit object pointing at that tree, recording the current branch tip as the parent. Finally it updates the current branch ref to point at the new commit.
+
+A commit object is plain text. Inspecting one shows the tree, parent, and metadata:
+
+```bash title="commit.sh" showLineNumbers
+git cat-file -p HEAD
+# tree 9f8e...
+# parent 1a2b...
+# author The Author <dev@example.com> 1768435200 +0000
+# committer The Author <dev@example.com> 1768435200 +0000
+#
+# Add internals post
+```
+
+## Refs and HEAD
+
+A branch is not a heavy object. It is a 41-byte file under `.git/refs/heads/` containing a single commit hash. `HEAD` is usually a symbolic ref pointing at the current branch:
+
+```bash title="refs.sh" showLineNumbers
+cat .git/HEAD              # ref: refs/heads/main
+cat .git/refs/heads/main   # the commit SHA main points to
+```
+
+## Why branches are cheap
+
+Creating a branch writes one tiny file with one hash. No copying, no snapshotting, no per-file overhead. Switching branches just moves `HEAD` and updates the working tree to match the target commit's tree.
+
+> Tip: Because objects are immutable and addressed by content, history "rewriting" never edits objects in place. It creates new commits and moves refs; the old objects linger until garbage collection.
+
+This is the whole trick: immutable, deduplicated objects plus movable pointers. Understanding it turns Git from a pile of incantations into a system you can reason about.

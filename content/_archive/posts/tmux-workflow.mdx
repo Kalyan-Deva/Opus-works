@@ -1,0 +1,95 @@
+---
+title: "A Productive tmux Workflow"
+date: "2026-04-16"
+excerpt: "Master tmux sessions, windows, and panes to keep your work alive across SSH disconnects and reboots of your patience."
+category: "Linux"
+tags: ["Linux", "Terminal", "Productivity"]
+author: "The Author"
+---
+
+tmux is a terminal multiplexer: it lets one terminal host many shells, splits them into panes, and keeps everything running even after you disconnect. For anyone who lives in the terminal or works over SSH, it is transformative.
+
+## The mental model
+
+tmux has three layers:
+
+- **Sessions** are the top level, usually one per project or task.
+- **Windows** are like tabs within a session.
+- **Panes** are splits within a window, each running its own shell.
+
+You drive tmux through a **prefix key** followed by a command key. The default prefix is `Ctrl-b`, though many people remap it to `Ctrl-a` for reachability.
+
+## The killer feature: detach and reattach
+
+Start a session, run a long job, close your laptop, and the session keeps running on the server. Reconnect later and pick up exactly where you left off. This alone justifies learning tmux for remote work.
+
+```bash title="tmux-basics.sh" showLineNumbers {2,5,8,11}
+# Start a named session
+tmux new -s work
+
+# Detach from inside tmux: press prefix, then d
+# List running sessions
+tmux ls
+
+# Reattach to a session by name
+tmux attach -t work
+
+# Kill a session you no longer need
+tmux kill-session -t work
+```
+
+Because the session lives in the tmux server, an SSH drop never kills your work.
+
+## Everyday keys
+
+After pressing the prefix:
+
+- `c` create a window, `n`/`p` next/previous window, `&` close window.
+- `%` split vertically, `"` split horizontally.
+- arrow keys move between panes; `z` zooms a pane to fullscreen and back.
+- `[` enters copy mode for scrolling and selecting text.
+
+## A sensible configuration
+
+A small `~/.tmux.conf` makes tmux far more pleasant. This one remaps the prefix, enables mouse support, fixes pane indexing, and adds intuitive split bindings.
+
+```bash title="~/.tmux.conf" showLineNumbers {2,6,9,12}
+# Use Ctrl-a as prefix
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix
+
+# Start windows and panes at 1, not 0
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Mouse support and a larger scrollback
+set -g mouse on
+set -g history-limit 10000
+
+# Intuitive splits that keep the current path
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+
+# Reload config without restarting
+bind r source-file ~/.tmux.conf \; display "Reloaded"
+```
+
+> Tip: After editing the file in a running session, press `prefix` then `r` to reload it instantly thanks to the binding above.
+
+## Scripting a layout
+
+You can script a project's entire layout so a single command rebuilds your editor, server, and logs panes. This is great for onboarding or for a setup you recreate daily.
+
+```bash title="dev-session.sh" showLineNumbers
+#!/usr/bin/env bash
+tmux new-session -d -s dev -n editor
+tmux send-keys -t dev:editor 'nvim .' C-m
+tmux new-window -t dev -n server
+tmux send-keys -t dev:server 'npm run dev' C-m
+tmux split-window -t dev:server -v
+tmux send-keys -t dev:server 'tail -f logs/app.log' C-m
+tmux attach -t dev
+```
+
+Run it and your whole environment springs to life. For more elaborate setups, tools like tmuxinator or tmux's own `resurrect`/`continuum` plugins persist layouts across reboots. Start with the config above, learn five keys, and build from there.

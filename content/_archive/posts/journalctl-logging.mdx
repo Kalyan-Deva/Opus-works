@@ -1,0 +1,95 @@
+---
+title: "Taming Logs with journalctl"
+date: "2026-03-13"
+excerpt: "Master the systemd journal — filter by unit, time, priority, and boot, follow logs live, enable persistence, and keep disk usage under control."
+category: "Linux"
+tags: ["Linux", "systemd", "SysAdmin"]
+author: "The Author"
+---
+
+On a systemd system, logs flow into the **journal** — a structured, indexed binary store managed by `systemd-journald`. Instead of grepping through scattered text files, you query the journal with one tool: `journalctl`. Once you learn its filters, log spelunking becomes precise and fast.
+
+## What makes the journal different
+
+Every log entry carries structured metadata: the unit that produced it, the priority, the PID, the boot ID, a timestamp, and more. That metadata is what you filter on, rather than parsing free text. Run `journalctl` with no arguments to page through everything (oldest first); add `-e` to jump to the end or `-r` to reverse the order.
+
+## Filtering by unit
+
+The most common query is "what did this service do?" Filter with `-u`:
+
+```bash title="by-unit.sh" showLineNumbers {2,5}
+# All log lines from a specific service
+journalctl -u nginx.service
+
+# Follow the service live, like tail -f
+journalctl -u nginx.service -f
+```
+
+`-f` streams new entries as they arrive — indispensable while reproducing a bug.
+
+## Filtering by time and boot
+
+The journal understands human time expressions and per-boot boundaries:
+
+```bash title="by-time.sh" showLineNumbers
+journalctl --since "2026-03-13 09:00" --until "2026-03-13 10:30"
+journalctl --since "1 hour ago"
+
+# Logs from the current boot, then the previous boot
+journalctl -b
+journalctl -b -1
+
+# List all recorded boots with their IDs
+journalctl --list-boots
+```
+
+## Filtering by priority
+
+Priorities follow the classic syslog levels (`emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info`, `debug`). Show only errors and worse:
+
+```bash title="by-priority.sh" showLineNumbers
+journalctl -p err -b          # err and above, this boot
+journalctl -u myapp -p warning..err   # a priority range
+```
+
+## Making logs persistent
+
+By default many systems keep the journal only in `/run`, which is wiped on reboot — so `journalctl -b -1` returns nothing. To keep history across reboots, store it on disk:
+
+```ini title="/etc/systemd/journald.conf" showLineNumbers {2}
+[Journal]
+Storage=persistent
+SystemMaxUse=2G
+```
+
+Create `/var/log/journal` (or let journald create it) and restart the service with `sudo systemctl restart systemd-journald`. The journal now survives reboots, bounded by the size cap you set.
+
+## Controlling disk usage
+
+Check how much space the journal occupies, then trim it by size or age:
+
+```bash title="vacuum.sh" showLineNumbers {2,5,8}
+# How big is the journal right now?
+journalctl --disk-usage
+
+# Keep only the most recent 500 MB
+sudo journalctl --vacuum-size=500M
+
+# Drop anything older than 14 days
+sudo journalctl --vacuum-time=14d
+```
+
+`SystemMaxUse` in `journald.conf` enforces the cap automatically; the `--vacuum-*` commands are for reclaiming space on demand.
+
+## Exporting and integrating
+
+For pipelines or external log systems, change the output format. `-o json` and `-o json-pretty` emit structured records, and `-o cat` strips metadata for clean text:
+
+```bash title="export.sh" showLineNumbers
+journalctl -u myapp -o json --since today > myapp-today.json
+journalctl -u myapp -o cat            # message text only
+```
+
+> Tip: Combine filters freely. `journalctl -u sshd -p err --since "yesterday" -o cat` gives you exactly the SSH errors from the last day with no noise.
+
+Between unit, time, priority, and boot filters, journalctl answers almost any "what happened and when" question in a single, composable command — which is precisely the point of a structured journal.

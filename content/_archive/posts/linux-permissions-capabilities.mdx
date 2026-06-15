@@ -1,0 +1,63 @@
+---
+title: "Beyond chmod: Linux ACLs and Capabilities"
+date: "2026-04-06"
+excerpt: "Move past basic rwx permissions into POSIX ACLs and Linux capabilities for finer-grained access control."
+category: "Linux"
+tags: ["Linux", "Security", "SysAdmin"]
+author: "The Author"
+---
+
+The classic `chmod` model is simple and durable, but it only describes permissions for one owner, one group, and everyone else. Real systems often need more nuance. Linux provides two powerful extensions: POSIX ACLs for per-user and per-group rules, and capabilities for splitting the all-or-nothing power of root.
+
+## A quick recap of the traditional model
+
+Every file has an owner, a group, and three permission triads: read (4), write (2), and execute (1) for user, group, and others. So `chmod 750 script.sh` grants the owner rwx, the group r-x, and others nothing.
+
+Three special bits sit on top:
+
+- **setuid** (`chmod u+s`): an executable runs with the file owner's identity. `/usr/bin/passwd` uses this to update `/etc/shadow`.
+- **setgid** (`chmod g+s`): on a directory, new files inherit the directory's group, which keeps shared project trees consistent.
+- **sticky bit** (`chmod +t`): on a directory like `/tmp`, only a file's owner can delete it.
+
+## POSIX ACLs: per-user and per-group rules
+
+When you need to grant one specific user access without changing ownership or creating a new group, reach for ACLs. Use `getfacl` to inspect and `setfacl` to modify.
+
+```bash title="acls.sh" showLineNumbers {2,5,8}
+# Give user "alice" read+write on a file
+setfacl -m u:alice:rw report.csv
+
+# Inspect the resulting ACL
+getfacl report.csv
+
+# Set a default ACL so new files in a dir inherit it
+setfacl -d -m g:editors:rwx /srv/shared
+```
+
+A file with ACLs shows a `+` after its permission string in `ls -l`. Default ACLs (the `-d` flag) apply to newly created children, which is handy for shared directories. Remove an entry with `setfacl -x u:alice report.csv` or clear everything with `setfacl -b`.
+
+> Tip: ACLs require a filesystem mounted with ACL support. Modern ext4, XFS, and Btrfs enable it by default.
+
+## Capabilities: breaking up root
+
+Historically, any task needing privileged operations ran as root with full power. Linux capabilities partition that power into discrete units, so a process can bind to a low port without also being able to read every file or load kernel modules.
+
+A classic example is `CAP_NET_BIND_SERVICE`, which permits binding to ports below 1024. Granting it to a binary lets an unprivileged service listen on port 80 without running as root.
+
+```bash title="capabilities.sh" showLineNumbers {2,5}
+# Allow a binary to bind privileged ports without root
+sudo setcap 'cap_net_bind_service=+ep' /usr/local/bin/myserver
+
+# Inspect what capabilities a file carries
+getcap /usr/local/bin/myserver
+```
+
+The `=+ep` suffix adds the capability to the file's effective and permitted sets. Other useful capabilities include `CAP_SYS_TIME` (set the system clock), `CAP_DAC_OVERRIDE` (bypass file permission checks), and `CAP_CHOWN`. Inspect a running process with `getpcaps <pid>`.
+
+## Choosing the right tool
+
+- Use **standard permissions** for the common case.
+- Use **ACLs** when access does not fit neatly into owner/group/other.
+- Use **capabilities** to grant a service exactly the privileges it needs and nothing more.
+
+Together these let you follow least privilege instead of reaching for root or `chmod 777`. The result is systems that are both more secure and easier to reason about.

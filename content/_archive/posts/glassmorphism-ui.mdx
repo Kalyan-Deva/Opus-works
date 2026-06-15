@@ -1,0 +1,37 @@
+---
+title: "Designing a Glassmorphism UI"
+date: "2026-06-12"
+excerpt: "Frosted surfaces, ambient gradients, and the contrast rules that keep glass readable in both light and dark mode."
+category: "Design"
+tags: ["Design", "CSS", "UI"]
+author: "The Author"
+---
+
+Glassmorphism is all about **depth through translucency**: frosted panels that
+let a blurred background bleed through, framed by a hairline border and a soft
+shadow.
+
+## The core recipe
+
+The whole effect comes down to four CSS properties working together:
+
+```css title="glass.css"
+.glass {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08);
+}
+```
+
+## Keep it readable
+
+Translucency is pretty, but it fights contrast. Two rules keep glass
+accessible:
+
+1. **Tune opacity per theme.** A value that looks great on a light background
+   turns to mud in dark mode. Define the surface separately for each.
+2. **Give the page something to blur.** Glass needs an ambient gradient or
+   image behind it — over a flat color there's nothing to refract.
+
+When in doubt, check body text against the surface at **4.5:1** contrast.

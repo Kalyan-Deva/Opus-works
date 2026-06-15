@@ -1,0 +1,35 @@
+---
+title: "Snort IDS/IPS: CVE Detection, Rule Engineering & Reverse Shell Detection"
+year: "2025"
+role: "Detection Engineer"
+summary: "Authored and tuned custom Snort rules in both passive IDS and inline IPS modes to catch real CVE exploits, SQL injection, and live reverse shells."
+stack: ["Snort", "Wireshark", "NFQUEUE", "Linux"]
+tags: ["Detection Engineering", "Network Security", "IDS/IPS"]
+order: 4
+---
+
+## Problem
+
+A detection rule is only worth something if it fires on real attacks without
+drowning analysts in false positives. I set out to build and validate detection
+for a set of high-severity, real-world exploits — and to do it in both monitoring
+and blocking configurations.
+
+## Approach
+
+I configured Snort in passive IDS mode and inline IPS mode (via `NFQUEUE`), then
+authored custom detection rules targeting:
+
+- **SQL injection** payloads against web applications.
+- **Three high-severity CVEs** — `CVE-2021-26855` (Microsoft Exchange
+  ProxyLogon), `CVE-2022-1388` (F5 BIG-IP iControl REST auth bypass), and
+  `CVE-2018-7600` (Drupalgeddon 2).
+- **Active reverse-shell payloads** on the wire.
+
+## Outcome
+
+I validated every signature against live PCAP captures in Wireshark, then
+iteratively tuned the rules to eliminate false positives. The deliverable was a
+structured analysis documenting each rule's detection logic, the evasion gaps
+that remained, and recommended IPS policy changes — the difference between a rule
+that looks right and one that holds up against a real capture.

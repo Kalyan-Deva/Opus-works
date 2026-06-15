@@ -1,0 +1,68 @@
+---
+title: "Defending Against Ransomware: A Layered Playbook"
+date: "2026-06-01"
+excerpt: "Understand the ransomware lifecycle and build layered defenses culminating in immutable, tested 3-2-1-1 backups."
+category: "Security"
+tags: ["Security", "Backup", "Resilience"]
+author: "The Author"
+---
+
+Ransomware is not a single event but a campaign that unfolds over hours or days. Understanding the lifecycle lets you place controls that interrupt the attacker at multiple points, and a tested backup strategy ensures you can recover even if every other control fails.
+
+## The attack lifecycle
+
+Most intrusions follow a recognizable path:
+
+1. **Initial access.** Phishing, exposed RDP or VPN, or an unpatched internet-facing service.
+2. **Establish and escalate.** The attacker installs persistence, harvests credentials, and gains higher privileges.
+3. **Lateral movement.** Using stolen credentials and remote services to spread across the network and reach high-value systems.
+4. **Exfiltration and encryption.** Data is often stolen for double extortion, then files are encrypted and a ransom demanded.
+
+Each stage is an opportunity to detect and stop the attack before encryption.
+
+## Defenses that break the chain
+
+- **Patch aggressively.** Internet-facing systems first. Unpatched VPNs and edge appliances are a leading entry point.
+- **Enforce MFA everywhere**, especially on remote access and administrative accounts. Phishing-resistant methods like FIDO2 raise the bar further.
+- **Segment the network.** Flat networks let one compromised host reach everything. Segmentation contains lateral movement.
+- **Deploy EDR.** Endpoint detection and response spots the behaviors, credential dumping, mass file changes, suspicious processes, that precede encryption.
+- **Least privilege.** Limit who can run as administrator and disable unused remote services.
+
+## Backups are the last line of defense
+
+If encryption succeeds, recoverable backups are what turn a catastrophe into an outage. Apply the **3-2-1-1 rule**:
+
+- **3** copies of your data.
+- **2** different media types.
+- **1** copy stored off-site.
+- **1** copy that is immutable or offline (air-gapped).
+
+That final "1" is what specifically defeats ransomware. Modern attackers hunt for and delete backups before encrypting. An immutable copy, using object-lock or write-once storage, cannot be altered or deleted even with stolen admin credentials.
+
+## Test your restores
+
+A backup you have never restored is a hope, not a plan. Verify integrity and practice recovery regularly so you know your real recovery time. The snippet below checks that a backup restores and that a known file matches its expected checksum:
+
+```bash title="verify-restore.sh" showLineNumbers {6,9-12}
+#!/usr/bin/env bash
+set -euo pipefail
+
+RESTORE_DIR=$(mktemp -d)
+
+# Restore the latest snapshot to a scratch directory
+restic restore latest --target "$RESTORE_DIR"
+
+# Confirm a critical file restored and matches its known good hash
+EXPECTED="9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+ACTUAL=$(sha256sum "$RESTORE_DIR/app/config.yaml" | awk '{print $1}')
+
+[ "$EXPECTED" = "$ACTUAL" ] && echo "Restore verified" || { echo "MISMATCH"; exit 1; }
+```
+
+Run this on a schedule and alert on failure, so a silently broken backup is caught long before you need it.
+
+> Tip: Keep your recovery runbook offline. If your environment is encrypted, a runbook stored only on the affected network is useless precisely when you need it most.
+
+## Summary
+
+Layer prevention (patching, MFA, segmentation, EDR, least privilege) to interrupt the lifecycle, and back it with 3-2-1-1 backups that include an immutable or offline copy. Then prove it works with regular, automated restore tests. Resilience is not having backups; it is knowing they restore.

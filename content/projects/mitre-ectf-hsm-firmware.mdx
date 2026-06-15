@@ -1,0 +1,41 @@
+---
+title: "HSM Firmware on ARM Cortex-M0+ (MITRE eCTF 2026)"
+year: "2026"
+role: "Team Lead · Embedded Security"
+summary: "Architected the full cryptographic stack for a Hardware Security Module on a bare-metal ARM Cortex-M0+ for MITRE's national embedded security competition."
+stack: ["C", "ARM Cortex-M0+", "AES-CBC-256", "HMAC-SHA256", "HKDF", "DMA"]
+tags: ["Embedded Security", "Cryptography", "Firmware"]
+featured: true
+order: 1
+---
+
+## Problem
+
+MITRE's eCTF is a national embedded-security competition where teams design a
+secure device and then attack one another's designs. The 2026 challenge centered
+on a Hardware Security Module (HSM): firmware that must protect secrets even when
+an attacker has physical access to the chip, can glitch its power, and can probe
+its timing. I led Team NEU-1 (NeuSense) as Team Lead.
+
+## Approach
+
+I architected the full cryptographic stack on a bare-metal ARM Cortex-M0+:
+
+- **Encryption** with AES-CBC-256 driven by the `AESADV` hardware peripheral,
+  using DMA-driven crypto offload so bulk operations run in constant time rather
+  than leaking secrets through data-dependent execution.
+- **A three-tier key hierarchy** derived with HKDF —
+  `ROOT_SEED` → `DEVICE_SEED` → `ENC_SEED` / `SESSION_SEED` — so a compromise at
+  one layer does not expose the layers above it.
+- **HMAC-SHA256** authentication on every protected message to guarantee
+  integrity and origin.
+- **A fail-closed permission model** plus **PIN rate limiting**, so the device
+  denies access by default and resists brute force.
+
+## Outcome
+
+The design hardened the firmware against the three failure modes that matter
+most for a physical device: secret extraction from flash, side-channel timing
+leakage, and fault-injection (glitching). Building it end-to-end — from the key
+schedule down to DMA timing — was a lesson in how cryptographic theory survives
+contact with real silicon.

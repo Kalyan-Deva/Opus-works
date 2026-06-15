@@ -1,0 +1,32 @@
+---
+title: "BD Alaris 8015 Medical Device Security Analysis"
+year: "2025"
+role: "Security Researcher"
+summary: "A full vulnerability study of a clinical infusion pump — from CVE research and a hardcoded-credentials finding to a complete threat model and DFD."
+stack: ["CVE Research", "Threat Modeling", "Data Flow Diagrams"]
+tags: ["Medical Device Security", "Threat Modeling", "Research"]
+order: 5
+---
+
+## Problem
+
+Clinical devices live for years on hospital networks, often unpatched. The BD
+Alaris 8015 PC Unit infusion pump is exactly the kind of deployed, long-lived
+device whose full attack surface deserves a careful look.
+
+## Approach
+
+I investigated `CVE-2016-9355` (sensitive data exposure) alongside a separately
+identified `CWE-798` (use of hardcoded credentials) weakness in the BD Alaris
+8015 PC Unit, working to map the device's complete attack surface rather than a
+single bug in isolation. From there I built out the supporting analysis: a threat
+model, a Data Flow Diagram (DFD) of how data and trust move through the device,
+and credential XML samples illustrating the finding.
+
+## Outcome
+
+The result was a complete research deliverable package — term paper, threat
+model, DFD, credential samples, and a presentation deck — that translated raw
+vulnerability data into structured findings with concrete remediation
+recommendations. It's a template for how to reason about the security of any
+deployed embedded device, not just a single pump.

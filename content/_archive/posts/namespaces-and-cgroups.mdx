@@ -1,0 +1,72 @@
+---
+title: "How Containers Really Work: Namespaces and cgroups v2"
+date: "2026-01-26"
+excerpt: "Containers are not a kernel object — they are a combination of namespaces for isolation and cgroups v2 for resource limits, assembled in userspace."
+category: "Linux"
+tags: ["Linux", "Containers", "Kernel"]
+author: "The Author"
+---
+
+The most important thing to understand about Linux containers is that **the kernel has no concept of a container**. There is no `struct container`, no container syscall, no container object. What Docker, Podman, and Kubernetes call a "container" is just a normal process whose view of the system has been restricted by two independent kernel features: **namespaces** and **cgroups**.
+
+## Namespaces: isolating what a process can see
+
+A namespace wraps a global system resource so the processes inside it have their own isolated instance. Linux provides several types:
+
+- **pid** — process IDs; PID 1 inside is not PID 1 on the host.
+- **net** — network interfaces, routing tables, firewall rules.
+- **mnt** — mount points and the filesystem view.
+- **uts** — hostname and domain name.
+- **ipc** — System V IPC and POSIX message queues.
+- **user** — UID/GID mappings, the basis of rootless containers.
+
+You can create namespaces directly with `unshare`, no container runtime required:
+
+```bash title="manual-container.sh" showLineNumbers {2}
+# New UTS + PID + mount namespace, run bash as PID 1 inside
+sudo unshare --uts --pid --mount --fork --mount-proc bash
+
+# Inside the new namespace:
+hostname isolated-box
+ps aux        # only sees processes in this PID namespace
+echo $$       # reports PID 1
+```
+
+The `--mount-proc` flag remounts `/proc` so tools like `ps` reflect the new PID namespace rather than the host's. This single command demonstrates the core of what a runtime does for you automatically.
+
+## User namespaces and rootless
+
+A user namespace maps a UID inside the namespace to a different UID outside. Root (UID 0) inside can map to an unprivileged UID on the host, which is exactly how rootless Podman runs "as root" in the container while being harmless on the host.
+
+```bash title="rootless.sh" showLineNumbers
+unshare --user --map-root-user id
+# uid=0(root) gid=0(root) ... but only inside this namespace
+```
+
+## cgroups v2: limiting what a process can use
+
+Namespaces isolate *visibility*; cgroups (control groups) limit *consumption* — CPU, memory, I/O, and PIDs. The v2 hierarchy is a unified tree mounted at `/sys/fs/cgroup`. You manage it by writing to files.
+
+```bash title="cgroup-limit.sh" showLineNumbers {2,5}
+# Create a cgroup and cap it to 100 MB of memory
+sudo mkdir /sys/fs/cgroup/demo
+echo "100M" | sudo tee /sys/fs/cgroup/demo/memory.max
+
+# Move the current shell into it
+echo $$ | sudo tee /sys/fs/cgroup/demo/cgroup.procs
+```
+
+Any memory allocation beyond `memory.max` now triggers reclaim and, if that fails, the cgroup OOM killer — without affecting the rest of the host. CPU is constrained similarly via `cpu.max`, which takes a quota and period pair.
+
+> Tip: Check which controllers are delegated to a cgroup by reading `cgroup.controllers`. A child cgroup can only use controllers enabled in its parent's `cgroup.subtree_control`.
+
+## Putting it together
+
+A container runtime simply:
+
+1. Creates a set of namespaces with `clone()`/`unshare()`.
+2. Pivots into a new root filesystem (the image layers).
+3. Places the process in a cgroup with resource limits.
+4. Drops capabilities and applies a seccomp filter.
+
+That's it. Once you see containers as *assembled* from these primitives rather than a monolithic kernel feature, debugging networking, permissions, and OOM kills becomes far more direct — you know exactly which primitive to inspect.

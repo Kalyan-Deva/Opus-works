@@ -1,0 +1,30 @@
+---
+title: "Bounty Hawk: Automated Recon & Reporting Pipeline"
+year: "2024"
+role: "Security Engineer"
+summary: "A modular Python and Bash pipeline that automates service detection, validation, and configuration checks across networked targets — with structured, repeatable output."
+stack: ["Python", "Bash", "Modular CLI Design"]
+tags: ["Automation", "Reconnaissance", "Tooling"]
+order: 6
+---
+
+## Problem
+
+Reconnaissance is repetitive, error-prone, and easy to do inconsistently — which
+makes results hard to compare and hard to hand off. I wanted a pipeline that ran
+the same way every time and produced output a teammate could pick up cold.
+
+## Approach
+
+I built a modular pipeline in Python and Bash to automate service detection,
+system validation, and configuration checks across networked targets. The
+modular CLI design meant each stage could be run independently or chained,
+producing consistent structured output rather than ad-hoc terminal scrollback.
+
+## Outcome
+
+The tool cut the manual verification effort for repeated recon workflows and
+standardized how results were recorded. I also wrote full internal documentation
+covering setup, usage, and output interpretation, so a new team member could
+onboard with no prior context — reflecting the knowledge-base discipline that
+makes security operations repeatable.

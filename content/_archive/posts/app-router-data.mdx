@@ -1,0 +1,37 @@
+---
+title: "Reading Content in the App Router"
+date: "2026-06-14"
+excerpt: "How server components read MDX off the filesystem at build time — no API routes, no client fetching."
+category: "Engineering"
+tags: ["Next.js", "React", "MDX"]
+author: "The Author"
+---
+
+The Next.js App Router makes a content site delightfully simple. Pages are
+**server components** by default, so they can touch the filesystem directly —
+no API layer, no `useEffect`, no loading spinners for content that's known at
+build time.
+
+## Static params for every post
+
+`generateStaticParams` tells Next.js which slugs exist so each post is
+pre-rendered to static HTML:
+
+```tsx title="app/blog/[slug]/page.tsx" showLineNumbers
+export function generateStaticParams() {
+  return getAllSlugs().map((slug) => ({ slug }));
+}
+```
+
+## Render MDX on the server
+
+`next-mdx-remote/rsc` compiles the MDX string inside the server component, so
+the heavy lifting never reaches the browser:
+
+```tsx
+import { MDXRemote } from "next-mdx-remote/rsc";
+
+<MDXRemote source={post.content} components={mdxComponents} />;
+```
+
+That's the whole data story — files in, static pages out.

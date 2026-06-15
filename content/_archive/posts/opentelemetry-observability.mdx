@@ -1,0 +1,79 @@
+---
+title: "Observability with OpenTelemetry"
+date: "2026-06-05"
+excerpt: "How OpenTelemetry's three signals, Collector, and context propagation give you vendor-neutral observability."
+category: "DevOps"
+tags: ["Observability", "OpenTelemetry", "DevOps"]
+author: "The Author"
+---
+
+Observability is the ability to ask new questions about your running system without shipping new code to answer them. OpenTelemetry (OTel) is the open, vendor-neutral standard that makes that practical across languages and backends.
+
+## The three signals
+
+OTel defines three telemetry signals that together describe system behavior:
+
+- **Traces:** the path of a single request as it flows through services, broken into timed spans. They answer "where did the latency go?"
+- **Metrics:** aggregated numeric measurements over time, such as request rate, error count, or queue depth. They answer "is anything trending the wrong way?"
+- **Logs:** timestamped event records, increasingly correlated to traces via shared IDs. They answer "what exactly happened here?"
+
+The power comes from correlation: a slow trace links to the metrics for that service and the logs for that exact request.
+
+## Vendor-neutral by design
+
+Before OTel, switching observability backends meant re-instrumenting your code against a proprietary agent. OTel decouples instrumentation from the backend. You instrument once against the OTel API, then point the data wherever you like, Jaeger, Prometheus, or a commercial platform, by changing an exporter, not your code.
+
+## Instrumentation: auto vs manual
+
+**Auto-instrumentation** uses language agents to wrap common libraries (HTTP servers, database drivers) with no code changes. It is the fastest way to get useful traces. **Manual instrumentation** lets you create spans around your own business logic for the detail auto-instrumentation cannot see.
+
+```python title="trace.py" showLineNumbers {1,4,7}
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+with tracer.start_as_current_span("checkout") as span:
+    span.set_attribute("cart.items", len(cart))
+    process_payment(cart)
+```
+
+## Context propagation
+
+For a trace to span multiple services, the trace context must travel with the request. OTel uses the W3C Trace Context standard, injecting a `traceparent` HTTP header so a downstream service joins the same trace instead of starting a new one. Auto-instrumentation handles this propagation for you across most HTTP and messaging libraries.
+
+## The Collector
+
+Rather than have every service talk to your backend directly, run the **OpenTelemetry Collector** as a pipeline. It receives telemetry, processes it (batching, sampling, redaction), and exports it onward. This centralizes configuration and lets you switch backends without touching application code.
+
+```yaml title="otel-collector.yaml" showLineNumbers {2,9,15}
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+exporters:
+  otlphttp:
+    endpoint: https://backend.example.com:4318
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp]
+```
+
+A pipeline is just receivers feeding processors feeding exporters. You can run several, one per signal.
+
+> Tip: Use the `batch` processor in every pipeline. Exporting spans one at a time crushes throughput; batching is the single most impactful Collector setting.
+
+## Getting started
+
+Begin with auto-instrumentation and a Collector in front of one backend. Add manual spans where your code does meaningful work, and correlate logs by attaching the trace ID. Because it is all standard OTLP, none of that work locks you into a vendor.
