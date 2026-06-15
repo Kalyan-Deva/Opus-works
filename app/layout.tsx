@@ -3,7 +3,7 @@ import { Inter, Fraunces, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Navbar } from "@/components/navbar";
 import { Footer } from "@/components/footer";
-import { site, siteByline } from "@/lib/site";
+import { site, siteByline, siteUrl } from "@/lib/site";
 import "./globals.css";
 
 const inter = Inter({
@@ -25,16 +25,23 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(site.url),
+  metadataBase: new URL(siteUrl),
   title: {
     default: `${siteByline} — Collected works`,
     template: `%s — ${site.name}`,
   },
   description: site.description,
+  alternates: {
+    types: { "application/rss+xml": "/feed.xml" },
+  },
   openGraph: {
     title: `${siteByline} — Collected works`,
     description: site.description,
     type: "website",
+    siteName: site.name,
+  },
+  twitter: {
+    card: "summary_large_image",
   },
 };
 

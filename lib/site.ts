@@ -22,3 +22,12 @@ export const site = {
 
 /** "Opus by Kalyan Gopalam" */
 export const siteByline = `${site.name} by ${site.author}`;
+
+/**
+ * Canonical base URL for feeds, sitemap, and OG images.
+ * Override with NEXT_PUBLIC_SITE_URL (e.g. the Vercel URL) until the custom
+ * domain is attached; otherwise falls back to site.url.
+ */
+export const siteUrl = (
+  process.env.NEXT_PUBLIC_SITE_URL || site.url
+).replace(/\/$/, "");
