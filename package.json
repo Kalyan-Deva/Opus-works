@@ -6,7 +6,7 @@
     "dev": "tinacms dev -c \"next dev\"",
     "dev:next": "next dev",
     "build": "next build",
-    "build:cms": "tinacms build && next build",
+    "build:cms": "tinacms build --skip-cloud-checks && next build",
     "start": "next start",
     "lint": "next lint"
   },
