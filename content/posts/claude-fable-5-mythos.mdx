@@ -1,0 +1,180 @@
+---
+title: "Mythos and Fable 5: Anthropic's Most Powerful Models — and the Collision With Washington"
+date: "2026-06-14"
+excerpt: "Anthropic built a model tier above Opus, shipped its first public 'Mythos-class' model in Fable 5 — and walked straight into a national-security fight with the U.S. government. What the models do, and what officials actually said."
+category: "AI"
+tags: ["AI", "Anthropic", "AI Policy", "Frontier Models"]
+author: "Kalyan Gopalam"
+---
+
+There is a particular kind of week in this industry where the technology and the politics stop being separate stories. The week of June 9, 2026 was one of them. Within the span of a few days, Anthropic shipped the most powerful generally available model it had ever released, disclosed the existence of an even more capable model it had deliberately chosen not to release, and found itself at the center of a national-security confrontation with the United States government — a confrontation that, by reporting on June 13, ended with the company suspending access to one of its own models.
+
+I want to walk through both halves of this carefully, because the temptation is to flatten one into the other. The model launch is a product story with facts you can cite to Anthropic's own announcement. The government collision is a policy story where many of the key claims could not be fetched from primary sources — outlets blocked automated access — so I will be explicit throughout about what is reported versus what is confirmed. As a security researcher, the part that keeps me up is the seam between them: a model good enough at finding software vulnerabilities to be genuinely useful for defense is, by construction, good enough to be genuinely dangerous in the wrong hands. That dual-use problem is the whole ballgame, and it is exactly what Washington seized on.
+
+Let me start with the architecture of what Anthropic actually built.
+
+## The Mythos class: a tier above Opus
+
+For most of the last two years, the mental model for Anthropic's lineup was a three-rung ladder: Haiku for speed and cost, Sonnet for the balance point, Opus for maximum capability. Fable 5 and its siblings break that frame. According to Anthropic, "Mythos-class" is a new top capability tier that sits *above* the Opus class — not a faster Opus or a cheaper Opus, but a distinct rung at the top of the ladder.
+
+Three models live in that tier. There is **Mythos Preview**, released in April 2026 as the first taste of the class. There is **Claude Mythos 5**, the latest and most capable update. And there is **Claude Fable 5**, released June 9, 2026, which is the first Mythos-class model to get a general public release. The naming is worth pausing on: the marketing language of "class" is doing real work here. Anthropic is signaling that these models are not incremental — they are a capability discontinuity significant enough to warrant their own band, with their own data-handling rules and their own release calculus.
+
+That calculus turns out to be the interesting part. Because the headline fact about the Mythos class is not that it is powerful. It is that Anthropic's most capable model in the class was, for months, a model it would not let the public touch.
+
+## Claude Mythos: the model they wouldn't ship
+
+Claude Mythos was initially released in April 2026. Per Anthropic, it is the company's most capable model for cybersecurity and biology research, and it is strikingly strong at computer-security tasks specifically. And it was not released to the public — held back over safety and misuse concerns.
+
+It is rare for a frontier lab to build something and then decline to ship it. The default commercial gravity runs the other way. So the restraint is itself a data point about how capable Anthropic believed the model to be, and how sharp the dual-use edge was.
+
+### Project Glasswing and the 10,000-vulnerability number
+
+Instead of a public launch, Anthropic ran Mythos through something it calls "Project Glasswing." Per Anthropic, roughly 50 partners used Mythos Preview to find **more than 10,000 high- or critical-severity vulnerabilities** across what Anthropic describes as systemically important software.
+
+Sit with that number for a moment, because it is the crux of everything that follows. Ten thousand high- or critical-severity findings is not a benchmark score. It is a claim about real software that real people depend on — and it cuts both ways with perfect symmetry. Read it as a defender and it is the most encouraging vulnerability-discovery result you have seen: a tool that can audit critical infrastructure at a scale no human red team could match. Read it as the U.S. government's national-security apparatus and it is a description of a weapon: a model that can find ten thousand ways into systemically important software, available to anyone who can pay for the API.
+
+Both readings are correct. That is what "dual-use" means, and it is why this number, more than any benchmark, is what the policy fight was actually about.
+
+It is also worth noting *who* the partners were and *what* "systemically important software" implies. A vetted-partner program of around 50 organizations, pointed at the software that underpins critical systems, is essentially a privately run, AI-accelerated vulnerability-research program operating at a scale that would have been infeasible a year earlier. The defensive value of that is enormous — every one of those 10,000-plus findings is, in principle, a flaw that can be patched before an adversary finds it independently. But the program also functions as an existence proof. It demonstrates, concretely and at scale, that the capability is real and that it works. Once you have proven that a model can do this, the question is no longer whether the capability exists; it is only who gets to wield it. That shift — from "can it" to "who" — is what moves a vulnerability-research result out of the lab and into the domain of national-security policy.
+
+### Mythos 5: even more capable, even more restricted
+
+Claude Mythos 5 is the latest update to the model. Per Anthropic, it brings gains across cybersecurity, biology, and healthcare benchmarks. And it is even more locked down than its predecessor: access is restricted to vetted Project Glasswing partners and a set of select biology researchers. There is no public API, no consumer subscription tier, no broad availability. If Mythos was the model they wouldn't ship, Mythos 5 is the model they shipped only to people they had individually vetted.
+
+So how do you take a capability tier this potent and offer *any* of it to the public? Anthropic's answer was Fable 5.
+
+## Claude Fable 5: Mythos-class capability for everyone
+
+Claude Fable 5, released June 9, 2026, is the first Mythos-class model with a general public release. Per Anthropic, it is the company's most powerful generally available model — state-of-the-art on "nearly all tested benchmarks," strong across software engineering, knowledge work, vision, and scientific research. It can run longer autonomous sessions than prior models and has improved long-context handling across millions of tokens.
+
+The strategic move here is elegant, and it is the key to the whole release. Fable 5 is Mythos-class capability with the most dangerous edges sanded off at the boundary — not by making the underlying model dumber, but by intercepting the specific request types that map to catastrophic misuse and routing them elsewhere. I will get to the mechanism, but the design intent is clear: deliver the general-purpose power of the top tier to a broad audience while structurally denying that same audience the offensive-cyber and bioweapon capabilities that kept Mythos behind glass.
+
+### The benchmarks
+
+Anthropic backed the "state-of-the-art" framing with a set of named partner results. I am reporting these as Anthropic presented them; they are vendor-cited figures, and as always with launch benchmarks the right posture is interested-but-skeptical until independent evaluation catches up.
+
+- **Stripe** reported that Fable 5 "compressed months of engineering into days" on a Ruby codebase migration.
+- Fable 5 posted the **highest score on Cognition's FrontierCode evaluation** among frontier models at medium effort.
+- Anthropic describes the model as **"state-of-the-art for tasks involving vision,"** noting it completed Pokémon FireRed through a vision-only interface — a now-traditional demonstration of long-horizon agentic play and visual grounding.
+- Fable 5 took the **highest score on Hebbia's Finance Benchmark** for senior-level reasoning.
+- Anthropic's **internal protein experts** reported roughly a **10x acceleration** on aspects of drug design.
+
+The throughline across these is autonomy and duration. A Ruby migration that compresses months into days, long agentic game sessions, senior-level financial reasoning — these are tasks that reward a model that can hold a goal across a very long context and act on it without constant human steering. That is the capability that makes Fable 5 commercially exciting. It is also, not coincidentally, the capability that makes the offensive-security version of the same model frightening.
+
+### The safeguards that made public release possible
+
+Here is the mechanism. Per Anthropic, Fable 5 ships with three classifier-based safeguards. Each watches for a specific category of dangerous request, and when one triggers, the request is not refused outright — it is *handed off* to Claude Opus 4.8 instead, the most capable model from the tier *below* Mythos. The user still gets a competent answer; they just do not get a Mythos-class answer to a Mythos-class-dangerous question.
+
+That fallback design is smarter than a flat refusal. A refusal tells an adversary exactly where the boundary is and invites them to probe around it. A silent capability downgrade to a strong-but-not-top-tier model is far less legible from the outside, and it preserves a good user experience for the overwhelming majority of legitimate requests that brush against a sensitive topic without crossing into actual misuse.
+
+| Safeguard | What it blocks | Fallback when triggered |
+|---|---|---|
+| Cybersecurity | Exploit development and offensive cyber tasks | Claude Opus 4.8 |
+| Biology / Chemistry | Bioweapon design and dangerous virus engineering | Claude Opus 4.8 |
+| Distillation | Attempts to extract or copy the model's capabilities | Claude Opus 4.8 |
+
+Two numbers frame how aggressive these classifiers are. Per Anthropic, **fewer than 5% of sessions** trigger the fallback — meaning the vast majority of users never touch the boundary at all. And external red-teaming exceeded **1,000 hours** and produced, in Anthropic's words, **"no universal jailbreaks."**
+
+I want to be precise about that last phrase, because it is doing careful work. "No universal jailbreaks" is not "no jailbreaks." It is a claim that red-teamers did not find a single reliable, general-purpose technique that defeats the safeguards across the board. It says nothing about narrow, situational, or non-universal bypasses — and as we will see, the existence of a *narrow* jailbreak is precisely the hinge the government dispute turned on. The careful phrasing was, in retrospect, load-bearing.
+
+### Pricing and availability
+
+Fable 5 is priced at **$10 per million input tokens and $50 per million output tokens**. Per Anthropic, that is less than half the price of Claude Mythos Preview, and the existing 90% prompt-caching input discount still applies. For a top-tier model the pricing is notable — it puts Mythos-class general capability within reach of ordinary API budgets rather than reserving it for the deepest pockets.
+
+On availability: Fable 5 went broadly available starting June 9, 2026, through the API and Enterprise, with subscription access arriving via a phased rollout through June 22 and then usage credits. Mythos 5, as noted, stayed restricted to Project Glasswing partners and select biology researchers.
+
+There is also a new data policy attached to the whole class. Per Anthropic, all Mythos-class traffic carries a **30-day retention** window and is **not used for model training or for any non-safety purpose**. In a release where the central tension is misuse of dangerous capability, a tightened, safety-scoped data policy is the kind of detail that reads as deliberate signaling: we are watching this traffic, briefly, for safety — and for nothing else.
+
+That is the product. Now the collision.
+
+## What the government said
+
+This is the section where I have to be most disciplined about sourcing. Many of the government and political claims below could not be fetched from primary sources — several outlets blocked automated access — so I am attributing each to the reporting that surfaced it. None of these should be read as flatly confirmed fact. Where the administration and Anthropic disagree, I will give both framings, because they genuinely diverge.
+
+With that caveat stated plainly, here is the timeline of official actions and statements as reported.
+
+### February: the "Hegseth ultimatum" and the cease-use directive
+
+The first reported friction predates the public launch by months. On **February 16, 2026**, according to financial and markets coverage that came to be summarized as "the Hegseth ultimatum," Anthropic reportedly faced a looming "supply chain risk" designation as safety negotiations with the administration stalled. The framing here is a government leverage move: a "supply chain risk" label is a serious thing for a vendor selling into federal agencies, and the reporting cast it as pressure applied while talks were not going well.
+
+Then, on **February 27, 2026**, the situation escalated sharply. As reported, President Trump directed federal agencies to "IMMEDIATELY CEASE all use of Anthropic's technology," outlining a roughly six-month phase-out period for agencies including the Department of War. A cease-use directive with a six-month runway is not a quiet bureaucratic note — it is a public, top-level instruction to unwind a vendor relationship across the federal government.
+
+### The foreign-national access order
+
+Separately, and centrally to the security argument, the U.S. government ordered Anthropic to suspend access by foreign nationals to its most capable AI models. The stated rationale, as reported, was national security — specifically, concern about the models' cybersecurity capabilities: their ability to find and exploit vulnerabilities. This is where the 10,000-vulnerability figure from Project Glasswing stops being a marketing achievement and becomes a national-security exhibit. If a model can find that many critical flaws in important software, the government's reported reasoning runs, then foreign-national access to the most capable version of it is an unacceptable risk.
+
+### June 13: the Mythos suspension
+
+The chain reportedly culminated on **June 13, 2026**. As reported by TIME and CNN, Anthropic suspended all access to the Mythos model after the U.S. government barred foreign-national use. So within days of Fable 5's public debut, the most capable model in the same class — the one already restricted to vetted partners — went dark entirely.
+
+### Two framings of the same ban
+
+This is where the accounts split, and the split matters.
+
+The administration's framing, as reported, is that this was a consequence of Anthropic's own choice. On this account, officials asked Anthropic CEO Dario Amodei to either fix a jailbreak or de-deploy Fable 5; Amodei declined; and the administration therefore casts the resulting ban as the predictable result of that refusal rather than an act of government aggression. In other words: we gave you a clear option, you said no, this is on you.
+
+That framing is contested. Anthropic's account, which I will lay out in the next section, disputes both the severity of the jailbreak at issue and the legitimacy of the standard being applied. The point for now is that there are two narratives running in parallel — "the company brought this on itself" versus "the government applied an impossible standard" — and the available reporting does not resolve which is the fairer characterization. I am not going to pretend it does.
+
+### The broader institutional backdrop
+
+Two further reported elements give the dispute its institutional shape. First, there is a Congressional Research Service product on Congress.gov — "Federal Government and Anthropic: Considerations for AI Innovation and Competition," indexed as IF13217 — that examines the federal government's relationship with Anthropic. A CRS product is a signal that this is not just an executive-branch squabble; it has reached the part of the government that briefs Congress.
+
+Second, the broader regulatory climate is, as reported, distinctive: a "pro-innovation" but strongly "pro-military" posture under the current administration, with the FTC reportedly beginning to roll back some prior AI consent orders. That combination — light-touch on commercial AI, heavy-handed on anything that touches military or national-security equities — is exactly the environment in which a model that is simultaneously a productivity tool and a cyber-offense capability becomes a flashpoint.
+
+## Anthropic's response
+
+Anthropic's reported posture is a careful one: comply, but dispute. Per the company and the reporting around it, Anthropic complied with the directive while arguing that the standard being applied was untenable — specifically, that the standard would halt all new frontier-model deployments across the entire industry, not just Anthropic's. That is a pointed argument. It reframes the dispute from "is Anthropic's model too dangerous" to "is *any* frontier model deployable under this rule," which, if accurate, makes the precedent an industry-wide one.
+
+On the jailbreak at the heart of the administration's "you chose this" framing, Anthropic's account is markedly narrower than the government's. Per the company, it received only *verbal* notice of a "potential narrow, non-universal jailbreak" — and it disagreed that something so qualified should be grounds for a recall. Hold that against the launch claim of "no universal jailbreaks" and the two statements line up precisely: the red-teaming found no universal bypass, and the thing the government allegedly raised was, by Anthropic's description, a *non-universal* one. The disagreement is not really about whether a narrow jailbreak exists. It is about whether a narrow, verbally communicated, non-universal bypass justifies pulling a model. The government reportedly said fix it or pull it; Anthropic reportedly said this does not meet the bar for a recall.
+
+Two further pieces of context round out the picture. First, separately from this dispute, Anthropic's CEO has publicly called for "FAA-style" regulation of powerful AI models, as reported by VentureBeat — a framework where a dedicated regulator certifies systems against a defined safety standard before deployment, the way aviation does. There is an irony worth naming here: a company asking for a rigorous federal safety regulator found itself, in the same season, fighting a federal safety-and-security intervention it considered ill-founded. Those are not actually contradictory positions — "regulate us with a clear, technically grounded standard" is a different thing from "accept an ad-hoc recall demand over a verbally described narrow bypass" — but the tension is real, and it is the kind of tension that gets a company accused of wanting regulation only on its own terms.
+
+Second, and as reported by TechCrunch, there is the timing. Anthropic released Fable 5 publicly just *days* after warning that AI is becoming too dangerous. A skeptic will read that as hypocrisy; a more charitable reading is that it is the entire thesis of the release made literal. The warning and the launch are the same argument: this capability is dangerous enough that we held the most potent version back, vetted everyone who touched it, and shipped the public version only behind three classifiers and a fallback model. Whether you find that convincing probably tracks how much you trust classifier-based safeguards to hold — which is a question red teams, not press releases, ultimately answer.
+
+## Why this matters
+
+Strip away the personalities and the timeline and what remains is a clean, hard problem that the security field has been circling for years and has now hit head-on.
+
+### The dual-use crux
+
+A model that is genuinely useful for finding software vulnerabilities is, by definition, useful for exploiting them. There is no version of Project Glasswing's 10,000 findings that is purely defensive. The same capability that lets 50 vetted partners harden systemically important software lets an unvetted adversary map its weak points. You cannot build the defensive tool without building the offensive one, because they are the same tool pointed in different directions. This is not a flaw in Anthropic's engineering; it is a property of the capability itself.
+
+That is why the foreign-national access order, as reported, fixated on exactly this: the models' ability to find and exploit vulnerabilities. From a national-security desk, a broadly available model with that capability is an export-control problem wearing a SaaS interface. The government's reported reasoning is not obviously unhinged — it is the predictable institutional response to a dual-use capability crossing a threshold of real usefulness. Whether the *specific* intervention was proportionate is a separate question, and one the reporting leaves genuinely contested.
+
+### The safety-versus-access tension
+
+Anthropic's architecture is, in effect, a technical answer to a policy question. The whole structure of the Mythos class — the unreleased model, the vetted-partner program, the public model gated behind classifiers that fall back to Opus 4.8 — is an attempt to thread a needle: democratize the general capability, withhold the dangerous specializations. Fewer than 5% of sessions hit the boundary; 1,000-plus hours of red-teaming found no universal bypass. As an engineering proposition, that is a serious effort.
+
+But the government dispute exposes the limit of a purely technical answer. The administration's reported "fix the jailbreak or de-deploy" demand is, at bottom, a refusal to accept "fewer than 5% and no *universal* jailbreak" as good enough. It insists that a *narrow* bypass is still a bypass, and that for a capability this consequential the acceptable failure rate may be lower than any classifier system can currently guarantee. That is the real disagreement, and it does not have a clean resolution. Classifier-based safeguards are probabilistic; national-security standards tend to be absolute. Those two things do not meet in the middle on their own.
+
+### What I would watch
+
+For practitioners, three things are worth tracking out of this episode. First, independent evaluation of Fable 5's safeguards — the "no universal jailbreaks" claim is exactly the sort of statement that external red teams exist to stress-test, and the credibility of the entire release rests on whether it holds up outside Anthropic's own testing. Second, whether the "FAA-style" regulation idea gains any traction now that there is a concrete, public case of the government and a lab disagreeing about what counts as an acceptable safety bar; the CRS product (IF13217) suggests the institutional machinery is at least paying attention. Third, the precedent itself. If Anthropic is right that the applied standard would halt all new frontier deployments industry-wide, then this was never really about one company or one model — it was the first live test of whether frontier models that are good at cybersecurity can be deployed at all under the current U.S. posture. That question is bigger than Fable 5, and it is not going away.
+
+The models are extraordinary. The fight over them is the more important story, because it is the one that determines whether the next extraordinary model gets shipped — and to whom.
+
+## Timeline
+
+| Date | Event |
+|---|---|
+| April 2026 | Mythos Preview released — first Mythos-class model (per Anthropic) |
+| April 2026 | Claude Mythos released; held back from public release over safety/misuse concerns (per Anthropic) |
+| Feb 16, 2026 | Reported "Hegseth ultimatum": looming "supply chain risk" designation as safety talks stall (reported) |
+| Feb 27, 2026 | President Trump reportedly directs agencies to "IMMEDIATELY CEASE all use of Anthropic's technology," ~6-month phase-out (reported) |
+| June 9, 2026 | Claude Fable 5 released — first Mythos-class public release; Claude Mythos 5 update for vetted partners (per Anthropic) |
+| June 13, 2026 | Anthropic suspends all access to Mythos after the U.S. government bars foreign-national use (reported by TIME/CNN) |
+| Through June 22, 2026 | Fable 5 subscription access via phased rollout, then usage credits (per Anthropic) |
+
+## Sources
+
+- Anthropic — [Claude Fable 5 and Claude Mythos 5](https://www.anthropic.com/news/claude-fable-5-mythos-5)
+- Anthropic — [Claude Mythos](https://www.anthropic.com/claude/mythos)
+- AWS — [Claude Fable 5 on Bedrock: Mythos-class capabilities with built-in safeguards](https://aws.amazon.com/blogs/aws/anthropic-claude-fable-5-on-aws-mythos-class-capabilities-with-built-in-safeguards-now-available/)
+- CNBC — [Anthropic Mythos / Claude Fable 5 coverage](https://www.cnbc.com/2026/06/09/anthropic-mythos-claude-fable-5.html)
+- TechCrunch — [Anthropic released Claude Fable 5, its most powerful model, publicly days after warning AI is getting too dangerous](https://techcrunch.com/2026/06/09/anthropic-released-claude-fable-5-its-most-powerful-model-publicly-days-after-warning-ai-is-getting-too-dangerous/)
+- VentureBeat — [Anthropic brings Mythos to the masses with Claude Fable 5](https://venturebeat.com/technology/anthropic-brings-mythos-to-the-masses-with-claude-fable-5-its-most-powerful-generally-available-model-ever)
+- TIME — [Anthropic Fable/Mythos ban and US security](https://time.com/article/2026/06/13/anthropic-fable-mythos-ban-US-security/)
+- CNN — [Anthropic Mythos model and national security](https://www.cnn.com/2026/06/13/business/anthropic-mythos-model-national-security)
+- Axios — [Anthropic Mythos-class safeguards](https://www.axios.com/2026/06/09/anthropic-mythos-class-safeguards)
+- VentureBeat — [Anthropic CEO calls for FAA-style regulation of powerful AI models](https://venturebeat.com/technology/anthropic-ceo-calls-for-faa-style-regulation-of-powerful-ai-models-what-enterprises-should-know)
+- Congress.gov — [CRS IF13217: Federal Government and Anthropic: Considerations for AI Innovation and Competition](https://www.congress.gov/crs-product/IF13217)
